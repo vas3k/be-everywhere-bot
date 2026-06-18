@@ -1,0 +1,62 @@
+# --- App data (credentials, sync state) ---
+
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- Secrets ---
+
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- uv / virtualenv ---
+
+.venv/
+venv/
+ENV/
+
+# --- Packaging / build ---
+
+dist/
+build/
+*.egg-info/
+*.egg
+
+# --- Testing / coverage ---
+
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- Type checkers / linters ---
+
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# --- OS ---
+
+.DS_Store
+Thumbs.db
+
+# --- Editors ---
+
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

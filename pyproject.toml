@@ -1,0 +1,10 @@
+[project]
+name = "be-everywhere-bot"
+version = "0.1.0"
+description = "Sync posts between social networks (Twitter, Telegram, ...)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "sqlalchemy>=2.0.51",
+]
