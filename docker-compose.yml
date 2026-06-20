@@ -8,6 +8,8 @@ services:
       - ./data:/app/data
 
     # Default: watch mode (poll every 20 min).
+    # Migrations run automatically on every start (including watch, --auth, --since).
+    # To migrate without starting sync:
     # Override for one-off tasks, e.g.:
     #   docker compose run --rm bot uv run python main.py --auth=twitter
     #   docker compose run --rm bot uv run python main.py --auth=telegram

@@ -1,3 +1,4 @@
+import base64
 import logging
 import re
 from datetime import datetime, timezone
@@ -6,24 +7,30 @@ from typing import Any
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, Post
+from apis.types import MediaItem, OutboundPost, Post
 from config import NETWORK_TWITTER, TWITTER_APP
-from db.credentials import get_all_credentials, set_credentials
+from db.accounts import (
+    Account,
+    create_account,
+    find_account,
+    get_all_credentials,
+    set_credentials,
+)
 
 logger = logging.getLogger(__name__)
 
 AUTH_HELP = """\
-Configure X (Twitter) as a sync source.
+Configure X (Twitter) account for mesh sync.
 
 You will be asked for:
   1. Bearer Token — from https://developer.x.com/en/portal/dashboard
        → your Project → App → "Keys and tokens" tab → Bearer Token → Generate / Regenerate
   2. Username — your @handle without the @ (e.g. "vas3k")
 
-Both are stored in the local SQLite database.
+Credentials are stored per account label in the local SQLite database.
 
 Note: X API v2 is pay-per-use. Reading your own timeline is an "owned read"
-(~$0.001 per tweet). Watch mode only polls recent tweets to keep costs low.
+(~$0.001 per post). Watch mode only polls recent posts to keep costs low.
 Use --since for one-off backfills.
 """
 
@@ -32,6 +39,7 @@ TWEET_FIELDS = (
 )
 MEDIA_FIELDS = "url,type,variants,alt_text,preview_image_url"
 EXPANSIONS = "attachments.media_keys"
+MEDIA_UPLOAD_URL = "https://upload.twitter.com/1.1/media/upload.json"
 
 _TRAILING_TCO = re.compile(r"\s+https?://t\.co/\w+\s*$", re.IGNORECASE)
 _TRAILING_STATUS_URL = re.compile(
@@ -89,10 +97,8 @@ def _extract_media(tweet: dict[str, Any], includes: dict[str, Any]) -> list[Medi
 
 
 def _strip_trailing_links(text: str, *, has_media: bool) -> str:
-    """Strip Twitter-appended trailing links only — keep user-shared URLs."""
     text = text.rstrip()
     text = _TRAILING_STATUS_URL.sub("", text).rstrip()
-    # One trailing t.co with media = Twitter's auto-appended media/card link
     if has_media:
         text = _TRAILING_TCO.sub("", text).rstrip()
     return text
@@ -138,7 +144,6 @@ def _tweet_to_post(tweet: dict[str, Any], includes: dict[str, Any], author_id: s
 
 
 def filter_originals_and_threads(posts: list[Post]) -> list[Post]:
-    """Keep standalone tweets and self-replies; drop replies to other people."""
     if not posts:
         return []
 
@@ -153,25 +158,15 @@ def filter_originals_and_threads(posts: list[Post]) -> list[Post]:
         if post.in_reply_to_user_id is not None:
             if str(post.in_reply_to_user_id) != str(author_id):
                 skipped += 1
-                logger.debug(
-                    "Skipping reply %s to user %s", post.id, post.in_reply_to_user_id
-                )
                 continue
         elif post.in_reply_to_id is not None:
-            # Thread reply to own older tweet may fall outside this page — use conversation
             in_own_thread = (
                 post.in_reply_to_id in own_ids
                 or post.conversation_id in own_thread_roots
             )
             if not in_own_thread:
                 skipped += 1
-                logger.debug(
-                    "Skipping reply %s in foreign conversation %s",
-                    post.id,
-                    post.conversation_id,
-                )
                 continue
-
         kept.append(post)
 
     if skipped:
@@ -179,19 +174,15 @@ def filter_originals_and_threads(posts: list[Post]) -> list[Post]:
     return kept
 
 
-def _require_creds(engine: Engine) -> dict[str, str]:
-    creds = get_all_credentials(engine, NETWORK_TWITTER)
+def _require_creds(engine: Engine, account_id: int) -> dict[str, str]:
+    creds = get_all_credentials(engine, account_id)
     missing = [k for k in ("bearer_token", "user_id", "username") if not creds.get(k)]
     if missing:
         raise RuntimeError(
-            f"X not configured (missing: {', '.join(missing)}). "
+            f"X account {account_id} not configured (missing: {', '.join(missing)}). "
             "Run: uv run python main.py --auth=twitter"
         )
     return creds
-
-
-def get_bearer_token(engine: Engine) -> str:
-    return _require_creds(engine)["bearer_token"]
 
 
 def _format_api_error(status: int, detail: Any) -> str:
@@ -200,11 +191,7 @@ def _format_api_error(status: int, detail: Any) -> str:
         if title == "CreditsDepleted" or "credits" in str(detail.get("type", "")).lower():
             return (
                 "X API credits depleted (HTTP 402).\n"
-                "Your developer account has no remaining API credits for this request.\n"
-                "Fix: https://developer.x.com/en/portal/dashboard → Billing / Products\n"
-                "  • Free tier: small monthly allowance, resets each billing period\n"
-                "  • Or purchase pay-as-you-go credits\n"
-                "This is an X account limit — not a bug in this app."
+                "Top up at https://developer.x.com/en/portal/dashboard"
             )
     return f"X API request failed ({status}): {detail}"
 
@@ -228,6 +215,21 @@ async def _api_get(
         return response.json()
 
 
+async def _api_post(bearer_token: str, path: str, json_body: dict[str, Any]) -> dict[str, Any]:
+    url = f"{TWITTER_APP.api_base_url}{path}"
+    headers = {"Authorization": f"Bearer {bearer_token}"}
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(url, headers=headers, json=json_body)
+        if not response.is_success:
+            detail: Any = response.text
+            try:
+                detail = response.json()
+            except Exception:
+                pass
+            raise RuntimeError(_format_api_error(response.status_code, detail))
+        return response.json()
+
+
 async def _lookup_user(bearer_token: str, username: str) -> dict[str, Any]:
     username = username.lstrip("@")
     data = await _api_get(
@@ -241,8 +243,58 @@ async def _lookup_user(bearer_token: str, username: str) -> dict[str, Any]:
     return user
 
 
-async def authenticate(engine: Engine) -> None:
-    """Prompt for bearer token and username, validate, store in SQLite."""
+def _twitter_media_type(item: MediaItem) -> tuple[str, str]:
+    if item.media_type == "photo":
+        return "image/jpeg", "tweet_image"
+    if item.media_type == "animated_gif":
+        return "video/mp4", "tweet_gif"
+    return "video/mp4", "tweet_video"
+
+
+async def _upload_media(
+    client: httpx.AsyncClient,
+    bearer_token: str,
+    raw: bytes,
+    item: MediaItem,
+) -> str:
+    content_type, category = _twitter_media_type(item)
+    headers = {"Authorization": f"Bearer {bearer_token}"}
+
+    init = await client.post(
+        MEDIA_UPLOAD_URL,
+        headers=headers,
+        data={
+            "command": "INIT",
+            "total_bytes": len(raw),
+            "media_type": content_type,
+            "media_category": category,
+        },
+    )
+    init.raise_for_status()
+    media_id = init.json()["media_id_string"]
+
+    append = await client.post(
+        MEDIA_UPLOAD_URL,
+        headers=headers,
+        data={
+            "command": "APPEND",
+            "media_id": media_id,
+            "segment_index": 0,
+            "media_data": base64.b64encode(raw).decode("ascii"),
+        },
+    )
+    append.raise_for_status()
+
+    finalize = await client.post(
+        MEDIA_UPLOAD_URL,
+        headers=headers,
+        data={"command": "FINALIZE", "media_id": media_id},
+    )
+    finalize.raise_for_status()
+    return str(media_id)
+
+
+async def authenticate(engine: Engine, label: str = "default") -> Account:
     print(AUTH_HELP)
     bearer_token = input("Bearer Token: ").strip()
     username = input("Username (without @): ").strip().lstrip("@")
@@ -251,30 +303,32 @@ async def authenticate(engine: Engine) -> None:
         raise RuntimeError("Bearer token and username are required.")
 
     user = await _lookup_user(bearer_token, username)
-    set_credentials(
-        engine,
-        NETWORK_TWITTER,
-        {
-            "bearer_token": bearer_token,
-            "user_id": str(user["id"]),
-            "username": user["username"],
-        },
-    )
-    print(f"X configured for @{user['username']}")
+    creds = {
+        "bearer_token": bearer_token,
+        "user_id": str(user["id"]),
+        "username": user["username"],
+    }
+
+    existing = find_account(engine, NETWORK_TWITTER, label)
+    if existing:
+        set_credentials(engine, existing.id, creds)
+        print(f"X account '{label}' updated for @{user['username']}")
+        return existing
+
+    account = create_account(engine, NETWORK_TWITTER, label, str(user["id"]))
+    set_credentials(engine, account.id, creds)
+    print(f"X account '{label}' configured for @{user['username']}")
+    return account
 
 
 async def fetch_posts(
     engine: Engine,
+    account_id: int,
     since: datetime | None = None,
     include_replies: bool = True,
     max_pages: int | None = None,
 ) -> list[Post]:
-    """Fetch posts from the user's own timeline (GET /2/users/:id/tweets).
-
-    Uses API ``start_time`` when ``since`` is set so X only bills owned reads
-    for tweets in range. ``max_pages`` caps pagination (watch mode).
-    """
-    creds = _require_creds(engine)
+    creds = _require_creds(engine, account_id)
     bearer_token = creds["bearer_token"]
     user_id = creds["user_id"]
 
@@ -287,7 +341,6 @@ async def fetch_posts(
     since_utc = since.astimezone(timezone.utc) if since else None
     if since_utc:
         base_params["start_time"] = since_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Always exclude retweets; keep replies (filter @-replies below)
     base_params["exclude"] = "retweets"
     if not include_replies:
         base_params["exclude"] = "replies,retweets"
@@ -329,41 +382,22 @@ async def fetch_posts(
 
         meta = data.get("meta") or {}
         pagination_token = meta.get("next_token")
-        logger.info(
-            "Timeline page %d: %d tweet(s) (%d total raw, %d kept so far)",
-            page,
-            len(tweets),
-            raw_count,
-            len(all_posts),
-        )
         if since_utc and reached_since_boundary:
-            logger.info("Reached --since boundary on page %d, stopping pagination", page)
             break
         if max_pages is not None and page >= max_pages:
-            logger.info("Hit max_pages=%d, stopping pagination", max_pages)
             break
         if not pagination_token:
             break
-
-    if skipped.get("retweet"):
-        logger.info("Filtered out %d retweet(s)", skipped["retweet"])
-    if skipped.get("quote"):
-        logger.info("Filtered out %d quote tweet(s)", skipped["quote"])
-    if skipped.get("at_reply"):
-        logger.info("Filtered out %d @-reply tweet(s)", skipped["at_reply"])
-    logger.info(
-        "Timeline done: %d raw -> %d after filters (since=%s)",
-        raw_count,
-        len(all_posts),
-        since.date() if since else "all",
-    )
 
     all_posts.sort(key=lambda p: p.created_at)
     return filter_originals_and_threads(all_posts)
 
 
-async def download_media(media: MediaItem, bearer_token: str) -> bytes:
-    """Download media bytes from X CDN (public URLs often work without auth)."""
+async def download_media(
+    media: MediaItem, engine: Engine, account_id: int
+) -> bytes:
+    creds = _require_creds(engine, account_id)
+    bearer_token = creds["bearer_token"]
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
         response = await client.get(media.url)
         if response.status_code in (401, 403) and bearer_token:
@@ -375,9 +409,43 @@ async def download_media(media: MediaItem, bearer_token: str) -> bytes:
         return response.content
 
 
+async def publish_outbound(
+    engine: Engine,
+    account_id: int,
+    outbound: OutboundPost,
+    media_bytes: list[bytes] | None = None,
+) -> str:
+    creds = _require_creds(engine, account_id)
+    bearer_token = creds["bearer_token"]
+    text = outbound.text or ""
+    media = outbound.media
+    bytes_list = media_bytes or []
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        media_ids: list[str] = []
+        for item, raw in zip(media, bytes_list):
+            media_ids.append(await _upload_media(client, bearer_token, raw, item))
+
+        payload: dict[str, Any] = {"text": text}
+        if media_ids:
+            payload["media"] = {"media_ids": media_ids}
+
+        data = await _api_post(bearer_token, "/tweets", payload)
+        tweet_id = data.get("data", {}).get("id")
+        if not tweet_id:
+            raise RuntimeError(f"X post tweet: missing id in response: {data}")
+        return str(tweet_id)
+
+
 async def publish_post(
     engine: Engine,
+    account_id: int,
     post: Post,
     media_bytes: list[bytes] | None = None,
 ) -> str:
-    raise NotImplementedError("X is configured as a source network only")
+    outbound = OutboundPost(
+        text=post.text,
+        media=post.media,
+        source_post_ids=[post.id],
+    )
+    return await publish_outbound(engine, account_id, outbound, media_bytes)

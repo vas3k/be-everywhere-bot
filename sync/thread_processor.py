@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from apis.types import MediaItem, OutboundPost, Post
-from config import DESTINATION_LIMITS, DestinationLimits, TELEGRAM_LIMITS
+from config import NETWORK_LIMITS, NetworkLimits, TELEGRAM_LIMITS
 
 
 def is_old_enough(post: Post, min_age_minutes: int) -> bool:
@@ -15,14 +15,14 @@ def is_old_enough(post: Post, min_age_minutes: int) -> bool:
 def collect_ready_batch(
     thread: list[Post],
     *,
-    is_posted: Callable[[str], bool],
+    is_synced: Callable[[str], bool],
     enforce_min_age: bool,
     min_age_minutes: int,
 ) -> list[Post]:
-    """Next unposted source posts in thread order; stops at first not old enough."""
+    """Next unsynced source posts in thread order; stops at first not old enough."""
     batch: list[Post] = []
     for post in thread:
-        if is_posted(post.id):
+        if is_synced(post.id):
             continue
         if enforce_min_age and not is_old_enough(post, min_age_minutes):
             break
@@ -31,7 +31,6 @@ def collect_ready_batch(
 
 
 def split_text(text: str, max_len: int) -> list[str]:
-    """Split text at paragraph / sentence / word boundaries."""
     if not text:
         return []
     if len(text) <= max_len:
@@ -68,9 +67,9 @@ def _chunk(items: list[MediaItem], size: int) -> list[list[MediaItem]]:
 
 def build_outbound_posts(
     posts: list[Post],
-    limits: DestinationLimits | None = None,
+    limits: NetworkLimits | None = None,
 ) -> list[OutboundPost]:
-    """Combine thread posts into one or more destination posts."""
+    """Combine thread posts into one or more outbound messages."""
     if not posts:
         return []
 
@@ -109,7 +108,7 @@ def build_outbound_posts(
     return out
 
 
-def get_destination_limits(destination: str) -> DestinationLimits:
-    if destination not in DESTINATION_LIMITS:
-        raise ValueError(f"No limits configured for destination: {destination}")
-    return DESTINATION_LIMITS[destination]
+def get_network_limits(network: str) -> NetworkLimits:
+    if network not in NETWORK_LIMITS:
+        raise ValueError(f"No limits configured for network: {network}")
+    return NETWORK_LIMITS[network]

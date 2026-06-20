@@ -2,26 +2,36 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timezone
 
 import httpx
 from sqlalchemy.engine import Engine
 
 from apis.types import MediaItem, OutboundPost, Post
 from config import NETWORK_TELEGRAM, TELEGRAM_APP
-from db.credentials import get_all_credentials, set_credential
+from db.accounts import (
+    Account,
+    create_account,
+    find_account,
+    get_all_credentials,
+    set_credential,
+    set_credentials,
+)
 
 logger = logging.getLogger(__name__)
 
 _RETRY_AFTER_RE = re.compile(r"retry after (\d+)", re.IGNORECASE)
+TG_FILE_PREFIX = "tgfile:"
 
 
-async def _get_bot_credentials(engine: Engine) -> tuple[str, str]:
-    creds = get_all_credentials(engine, NETWORK_TELEGRAM)
+async def _get_bot_credentials(engine: Engine, account_id: int) -> tuple[str, str]:
+    creds = get_all_credentials(engine, account_id)
     bot_token = creds.get("bot_token")
     channel_id = creds.get("channel_id")
     if not bot_token or not channel_id:
         raise RuntimeError(
-            "Telegram not configured. Run: python main.py --auth=telegram"
+            f"Telegram account {account_id} not configured. "
+            "Run: python main.py --auth=telegram"
         )
     return bot_token, channel_id
 
@@ -62,8 +72,74 @@ async def _post_with_retry(client: httpx.AsyncClient, url: str, **kwargs) -> htt
         await asyncio.sleep(wait)
 
 
-async def authenticate(engine: Engine) -> None:
-    """Prompt for bot token and channel ID, store in database."""
+def _normalize_chat_id(channel_id: str) -> str:
+    return channel_id.strip().lower()
+
+
+def _chat_matches(channel_id: str, chat: dict) -> bool:
+    configured = _normalize_chat_id(channel_id)
+    chat_username = (chat.get("username") or "").lower()
+    chat_id = str(chat.get("id", ""))
+    if configured.startswith("@"):
+        return chat_username == configured.lstrip("@")
+    return chat_id == configured
+
+
+def _extract_media(message: dict) -> list[MediaItem]:
+    items: list[MediaItem] = []
+    if photos := message.get("photo"):
+        largest = max(photos, key=lambda p: p.get("file_size", 0))
+        items.append(
+            MediaItem(
+                url=f"{TG_FILE_PREFIX}{largest['file_id']}",
+                media_type="photo",
+            )
+        )
+    elif video := message.get("video"):
+        items.append(
+            MediaItem(
+                url=f"{TG_FILE_PREFIX}{video['file_id']}",
+                media_type="video",
+            )
+        )
+    elif animation := message.get("animation"):
+        items.append(
+            MediaItem(
+                url=f"{TG_FILE_PREFIX}{animation['file_id']}",
+                media_type="animated_gif",
+            )
+        )
+    return items
+
+
+def _message_to_post(message: dict, channel_id: str) -> Post | None:
+    chat = message.get("chat") or {}
+    if not _chat_matches(channel_id, chat):
+        return None
+
+    text = message.get("text") or message.get("caption") or ""
+    media = _extract_media(message)
+    if not text and not media:
+        return None
+
+    message_id = str(message["message_id"])
+    conversation_id = (
+        str(message["media_group_id"]) if message.get("media_group_id") else message_id
+    )
+    created_at = datetime.fromtimestamp(message["date"], tz=timezone.utc)
+
+    return Post(
+        id=message_id,
+        text=text,
+        created_at=created_at,
+        conversation_id=conversation_id,
+        author_id=str(chat.get("id", channel_id)),
+        media=media,
+        is_thread_root=conversation_id == message_id,
+    )
+
+
+async def authenticate(engine: Engine, label: str = "default") -> Account:
     bot_token = input("Telegram bot token: ").strip()
     channel_id = input("Telegram channel ID (e.g. @mychannel or -1001234567890): ").strip()
 
@@ -72,24 +148,97 @@ async def authenticate(engine: Engine) -> None:
         response.raise_for_status()
         bot = response.json()["result"]
 
-    set_credential(engine, NETWORK_TELEGRAM, "bot_token", bot_token)
-    set_credential(engine, NETWORK_TELEGRAM, "channel_id", channel_id)
-    print(f"Telegram configured for bot @{bot['username']} -> {channel_id}")
+    creds = {"bot_token": bot_token, "channel_id": channel_id, "update_offset": "0"}
+    remote_id = channel_id
+
+    existing = find_account(engine, NETWORK_TELEGRAM, label)
+    if existing:
+        set_credentials(engine, existing.id, creds)
+        print(f"Telegram account '{label}' updated: @{bot['username']} -> {channel_id}")
+        return existing
+
+    account = create_account(engine, NETWORK_TELEGRAM, label, remote_id)
+    set_credentials(engine, account.id, creds)
+    print(f"Telegram account '{label}' configured: @{bot['username']} -> {channel_id}")
+    return account
 
 
 async def fetch_posts(
     engine: Engine,
-    since=None,
+    account_id: int,
+    since: datetime | None = None,
     include_replies: bool = True,
+    max_pages: int | None = None,
 ) -> list[Post]:
-    raise NotImplementedError("Telegram is configured as a destination network only")
+    """Fetch channel posts delivered to the bot via getUpdates."""
+    bot_token, channel_id = await _get_bot_credentials(engine, account_id)
+    creds = get_all_credentials(engine, account_id)
+    offset = int(creds.get("update_offset") or 0)
+    since_utc = since.astimezone(timezone.utc) if since else None
+
+    if since_utc:
+        logger.warning(
+            "Telegram account %d: Bot API cannot backfill channel history; "
+            "only posts received via getUpdates since bot setup will sync",
+            account_id,
+        )
+
+    posts: list[Post] = []
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        while True:
+            response = await client.get(
+                _api_url(bot_token, "getUpdates"),
+                params={
+                    "offset": offset,
+                    "timeout": 0,
+                    "allowed_updates": json.dumps(["channel_post"]),
+                },
+            )
+            response.raise_for_status()
+            updates = response.json().get("result") or []
+            if not updates:
+                break
+
+            for update in updates:
+                offset = max(offset, update["update_id"] + 1)
+                message = update.get("channel_post")
+                if not message:
+                    continue
+                post = _message_to_post(message, channel_id)
+                if not post:
+                    continue
+                if since_utc and post.created_at < since_utc:
+                    continue
+                posts.append(post)
+
+    set_credential(engine, account_id, "update_offset", str(offset))
+    posts.sort(key=lambda p: p.created_at)
+    return posts
 
 
-async def download_media(media: MediaItem, access_token: str = "") -> bytes:
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-        response = await client.get(media.url)
+async def download_media(
+    media: MediaItem, engine: Engine, account_id: int
+) -> bytes:
+    if not media.url.startswith(TG_FILE_PREFIX):
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+            response = await client.get(media.url)
+            response.raise_for_status()
+            return response.content
+
+    bot_token, _ = await _get_bot_credentials(engine, account_id)
+    file_id = media.url.removeprefix(TG_FILE_PREFIX)
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.get(
+            _api_url(bot_token, "getFile"),
+            params={"file_id": file_id},
+        )
         response.raise_for_status()
-        return response.content
+        file_path = response.json()["result"]["file_path"]
+        file_response = await client.get(
+            f"{TELEGRAM_APP.api_base}/file/bot{bot_token}/{file_path}"
+        )
+        file_response.raise_for_status()
+        return file_response.content
 
 
 def _media_filename(item: MediaItem, index: int) -> str:
@@ -118,11 +267,11 @@ def _file_field(item: MediaItem) -> str:
 
 async def publish_outbound(
     engine: Engine,
+    account_id: int,
     outbound: OutboundPost,
     media_bytes: list[bytes] | None = None,
 ) -> str:
-    """Publish one outbound post to Telegram. Returns message ID."""
-    bot_token, channel_id = await _get_bot_credentials(engine)
+    bot_token, channel_id = await _get_bot_credentials(engine, account_id)
     text = outbound.text or None
     media = outbound.media
     bytes_list = media_bytes or []
@@ -150,7 +299,6 @@ async def publish_outbound(
             data: dict[str, str] = {"chat_id": channel_id}
             if text:
                 data["caption"] = text
-
             field = _file_field(item)
             method = _send_method(item)
             files = {field: (_media_filename(item, 0), bytes_list[0])}
@@ -162,7 +310,6 @@ async def publish_outbound(
             )
             if not response.is_success:
                 raise RuntimeError(f"Telegram {method}: {_telegram_api_error(response)}")
-            logger.info("Sent %s via %s (%d bytes)", log_id, method, len(bytes_list[0]))
             return str(response.json()["result"]["message_id"])
 
         media_group = []
@@ -185,19 +332,18 @@ async def publish_outbound(
         if not response.is_success:
             raise RuntimeError(f"Telegram sendMediaGroup: {_telegram_api_error(response)}")
         messages = response.json()["result"]
-        logger.info("Sent %s as media group (%d items)", log_id, len(media))
         return str(messages[0]["message_id"])
 
 
 async def publish_post(
     engine: Engine,
+    account_id: int,
     post: Post,
     media_bytes: list[bytes] | None = None,
 ) -> str:
-    """Publish a single source post (wraps publish_outbound)."""
     outbound = OutboundPost(
         text=post.text,
         media=post.media,
         source_post_ids=[post.id],
     )
-    return await publish_outbound(engine, outbound, media_bytes)
+    return await publish_outbound(engine, account_id, outbound, media_bytes)

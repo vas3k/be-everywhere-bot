@@ -1,26 +1,23 @@
 # be-everywhere-bot
 
-A small Python app that syncs your posts from **X (Twitter)** to **Telegram** and **Mastodon**. It polls your own timeline, filters out noise (replies, retweets, quotes), combines threads into readable messages, re-uploads media, and tracks what was already posted so nothing is duplicated.
-
-Designed to be extended: more source and destination networks can be added later without rewriting the core.
+A small Python app that **mesh-syncs** your posts across **X (Twitter)**, **Telegram**, and **Mastodon**. When a new post appears on any connected account, it is reposted to every other account. The bot tracks what was already synced so nothing is duplicated — including posts it created itself (so a Twitter thread reposted to Telegram is never echoed back to Twitter).
 
 ## Features
 
-- **X → Telegram / Mastodon sync** — text, photos, videos, and GIFs
-- **Thread support** — consecutive tweets in the same conversation are merged into one or more Telegram messages, in order
-- **Smart filtering** — skips retweets, quote tweets, `@`-replies, and replies to other people
-- **Link unwrapping** — `t.co` and other shorteners are resolved to the real URL before posting
-- **Duplicate protection** — SQLite tracks every successfully synced post per destination
+- **Mesh sync** — every configured account syncs to every other account
+- **Multiple accounts per network** — connect several Twitter/Telegram/Mastodon accounts with `--label`
+- **Thread support** — consecutive posts in the same conversation are merged when the destination allows
+- **Duplicate protection** — `sync_mappings` + `mirrored_posts` prevent re-syncing and circular reposts
+- **Smart filtering** (X) — skips retweets, quote tweets, `@`-replies, and replies to other people
+- **Link unwrapping** — `t.co` and other shorteners are resolved before posting
 - **Two run modes** — continuous watch (poll every 20 min) and one-shot backfill (`--since`)
-- **Credit-conscious** — watch mode only reads recent own tweets from the X API, not your full history every poll
+- **Database migrations** — schema upgrades run automatically on startup
 
 ## Requirements
 
 - **Python 3.13+**
-- **[uv](https://docs.astral.sh/uv/)** (recommended) or pip
-- An **X Developer account** with API credits ([developer.x.com](https://developer.x.com/en/portal/dashboard))
-- A **Telegram bot** ([@BotFather](https://t.me/BotFather)) with permission to post to your channel
-- A **Mastodon account** with an access token for your instance (optional)
+- **[uv](https://docs.astral.sh/uv/)** (recommended)
+- API credentials for each network you want to connect
 
 ## Quick start
 
@@ -29,292 +26,198 @@ git clone <repo-url> be-everywhere-bot
 cd be-everywhere-bot
 uv sync
 
-# Configure credentials (interactive prompts, stored in SQLite)
+# Configure accounts (repeat with different --label for multiple accounts)
 uv run python main.py --auth=twitter
 uv run python main.py --auth=telegram
 uv run python main.py --auth=mastodon
 
-# Run continuous sync
+# List connected accounts
+uv run python main.py --list-accounts
+
+# Run continuous mesh sync
 uv run python main.py
 ```
 
 ## Setup
 
-### 1. Install dependencies
+### Connect accounts
 
 ```bash
-uv sync
+uv run python main.py --auth=twitter --label=personal
+uv run python main.py --auth=twitter --label=work
+uv run python main.py --auth=telegram --label=main
+uv run python main.py --auth=mastodon --label=fedi
 ```
 
-Dependencies: `httpx` (HTTP client), `sqlalchemy` (SQLite). No `.env` file is required — all account secrets go into the local database.
+Re-running `--auth` with the same network + label updates credentials.
 
-### 2. Configure X (Twitter)
+### X (Twitter)
 
-```bash
-uv run python main.py --auth=twitter
-```
+Bearer token from [developer.x.com](https://developer.x.com/en/portal/dashboard) and your `@handle`.
 
-You will be prompted for:
+### Telegram
 
-| Field | Where to get it |
-|-------|-----------------|
-| **Bearer Token** | [developer.x.com](https://developer.x.com/en/portal/dashboard) → your Project → App → **Keys and tokens** → **Bearer Token** → Generate |
-| **Username** | Your `@handle` without the `@` (e.g. `vas3k`) |
+Bot token from [@BotFather](https://t.me/BotFather) and channel ID (`@channel` or `-100…`). The bot must be a channel admin. New channel posts are received via `getUpdates` — the Bot API cannot backfill full channel history.
 
-The app validates the token, looks up your numeric user ID, and stores everything in `data/be_everywhere.db`.
+### Mastodon
 
-**X API billing:** reading your own timeline is an *owned read* (~$0.001 per tweet on pay-per-use). Watch mode is tuned to minimize reads. If credits run out you will see HTTP 402 — top up at the developer portal.
-
-### 3. Configure Telegram
-
-```bash
-uv run python main.py --auth=telegram
-```
-
-You will be prompted for:
-
-| Field | Where to get it |
-|-------|-----------------|
-| **Bot token** | [@BotFather](https://t.me/BotFather) → `/newbot` or use an existing bot |
-| **Channel ID** | `@yourchannel` or numeric ID like `-1001234567890` |
-
-The bot must be an **admin** of the channel with permission to post messages.
-
-To find a numeric channel ID: forward a channel post to [@userinfobot](https://t.me/userinfobot) or use the Telegram API.
-
-### 4. Configure Mastodon (optional)
-
-```bash
-uv run python main.py --auth=mastodon
-```
-
-You will be prompted for:
-
-| Field | Where to get it |
-|-------|-----------------|
-| **Instance URL** | Your server's base URL (e.g. `https://mastodon.social`) |
-| **Access Token** | Instance → **Preferences** → **Development** → your app → **Access token** |
-
-Create a new application with `read` + `write` scopes if you don't have one yet. The token is stored in `data/be_everywhere.db`.
+Instance URL and access token (Preferences → Development → your app). Needs `read` + `write` scopes.
 
 ## Running
 
 ```bash
-uv run python main.py                 # watch mode (default)
+uv run python main.py                      # watch mode (default)
 uv run python main.py --since=2026-01-01   # backfill from date
-uv run python main.py -v              # verbose / debug logging
-uv run python main.py --help          # full CLI help + auth instructions
+uv run python main.py --list-accounts      # show configured accounts
+uv run python main.py -v                   # debug logging
 ```
 
-### Watch mode (default)
+### Watch mode
 
-Polls every **20 minutes**. For each cycle:
+Polls every **20 minutes**. For each account:
 
-1. Fetches your recent own tweets (see [API cost controls](#x-api-cost-controls))
-2. Skips posts younger than **30 minutes** (so you can still edit or delete on X)
-3. Publishes anything not yet in the database
-4. Sleeps until the next cycle
+1. Fetches recent posts (skipping mirrored/sync-created posts)
+2. Skips posts younger than **30 minutes** (editable window on source networks)
+3. Publishes unsynced content to every other account
+4. Records mappings so the same content is never reposted again
 
-Run this as a long-lived process (terminal, `tmux`, `systemd`, etc.).
+### Backfill (`--since`)
 
-### Backfill mode (`--since`)
-
-One-shot sync of all eligible posts since the given date (UTC midnight):
-
-```bash
-uv run python main.py --since=2026-01-01
-uv run python main.py --since=2026-06-01T12:00:00   # optional time
-```
-
-- Skips the 30-minute min-age filter (posts immediately)
-- Adds a **3 second delay** between posts to avoid Telegram rate limits
-- Paginates through your full timeline back to the date — use this for initial import, not watch mode
-
-### Re-authenticate
-
-Credentials can be updated at any time by running `--auth=twitter`, `--auth=telegram`, or `--auth=mastodon` again.
+One-shot sync since the given date. Skips min-age filter, adds a **3 second delay** between publishes. Works for X and Mastodon history; Telegram only picks up posts received via `getUpdates` since the bot was configured.
 
 ### Docker
 
 ```bash
-# One-time auth (interactive prompts; writes to ./data/)
 docker compose run --rm bot uv run python main.py --auth=twitter
 docker compose run --rm bot uv run python main.py --auth=telegram
 docker compose run --rm bot uv run python main.py --auth=mastodon
-
-# Run watch mode in the background
 docker compose up -d
-
-# Logs
-docker compose logs -f
-
-# One-off backfill
-docker compose run --rm bot uv run python main.py --since=2026-01-01
-
-# Stop
-docker compose down
 ```
-
-The `./data` directory is mounted as a volume so credentials and sync state survive container restarts.
 
 ## How it works
 
 ```mermaid
-flowchart LR
-    subgraph fetch [Fetch]
-        X["X API\n/users/:id/tweets"]
-        Filter["Filter\n@-replies, RTs, quotes"]
+flowchart TB
+    subgraph accounts [Configured accounts]
+        TW["Twitter @you"]
+        TG["Telegram channel"]
+        M["Mastodon @you"]
     end
 
-    subgraph process [Process]
-        Group["Group by\nconversation_id"]
-        Thread["Merge thread\ntweets"]
-        URLs["Unwrap t.co\nlinks"]
-        Media["Download media\nfrom X CDN"]
+    subgraph sync [Each sync cycle]
+        Fetch["Fetch new posts\n(skip mirrored)"]
+        Fan["Fan out to\nevery other account"]
+        Map["Record sync_mappings\n+ mirrored_posts"]
     end
 
-    subgraph publish [Publish]
-        TG["Telegram Bot API\nsendMessage / sendPhoto / …"]
-        M["Mastodon API\nstatuses + media"]
-        DB["SQLite\nmark as posted"]
-    end
-
-    X --> Filter --> Group --> Thread --> URLs --> Media --> TG --> DB
-    Media --> M --> DB
+    TW --> Fetch
+    TG --> Fetch
+    M --> Fetch
+    Fetch --> Fan --> Map
 ```
 
-### Sync pipeline
+### Duplicate prevention
 
-1. **Fetch** — `apis/twitter.py` calls `GET /2/users/{id}/tweets` for your own account only. No third-party timelines or search endpoints.
-2. **Filter** — drops retweets, quotes, tweets starting with `@`, and replies to other users. Keeps standalone tweets and self-thread continuations.
-3. **Group** — tweets with the same `conversation_id` are treated as one thread.
-4. **Batch** — within each thread, unposted tweets are collected in chronological order. In watch mode, stops at the first tweet that is not yet old enough.
-5. **Transform** — thread text is joined with blank lines. Long text is split at paragraph/sentence boundaries to fit Telegram limits. Media is chunked into albums of up to 4 items.
-6. **Publish** — media is downloaded from X, `t.co` links in text are unwrapped, and messages are sent to each configured destination (Telegram bot API, Mastodon statuses API).
-7. **Track** — each source post ID is recorded in SQLite **only after** a successful publish per destination. Failed posts stay unmarked and will be retried on the next cycle.
-
-### What gets synced
-
-| Included | Excluded |
-|----------|----------|
-| Original tweets | Retweets |
-| Self-thread replies (e.g. `2/ …`) | Tweets starting with `@` |
-| Photos, videos, GIFs | Quote tweets |
-| Links in tweet text (unwrapped) | Replies to other people |
-
-Trailing X media/status links appended by Twitter are stripped. User-shared `t.co` links in text-only tweets are kept and unwrapped at publish time.
-
-## Project structure
-
-```
-be-everywhere-bot/
-├── main.py                 # CLI entry point: watch / --since / --auth
-├── config.py               # Timing, paths, network pairs, API settings
-│
-├── apis/                   # One module per social network (same function interface)
-│   ├── types.py            # Post, MediaItem, OutboundPost dataclasses
-│   ├── twitter.py          # X auth, fetch_posts, download_media
-│   ├── telegram.py         # Telegram auth, publish_outbound
-│   ├── mastodon.py          # Mastodon auth, publish_outbound
-│   └── urls.py             # Short-link unwrapping (t.co, bit.ly, …)
-│
-├── db/
-│   ├── schema.py           # SQLAlchemy table definitions
-│   ├── connection.py       # SQLite engine + auto-create tables
-│   ├── credentials.py      # Store/read network tokens
-│   └── posts.py            # Posted-post tracking, sync state
-│
-├── sync/
-│   ├── engine.py           # Orchestrates fetch → group → publish → mark
-│   └── thread_processor.py # Thread merging, text splitting, media chunking
-│
-├── data/                   # Created at runtime (gitignored)
-│   └── be_everywhere.db    # Credentials + posted posts + sync timestamps
-│
-├── pyproject.toml
-└── uv.lock
-```
-
-### Key modules
-
-| Module | Role |
-|--------|------|
-| `main.py` | Parses CLI args, runs watch loop or one-shot backfill |
-| `config.py` | All tunable constants — edit here, not scattered in code |
-| `sync/engine.py` | Core sync logic; maps source→destination pairs from `SYNC_PAIRS` |
-| `apis/twitter.py` | X API v2 client (Bearer token auth, timeline pagination) |
-| `apis/telegram.py` | Telegram Bot API client with rate-limit retry |
-| `apis/mastodon.py` | Mastodon REST API client (statuses + media upload) |
-| `db/posts.py` | `is_posted()`, `mark_posted()`, `get_last_synced_at()` |
-
-Each network module exposes the same async functions (no classes): `authenticate`, `fetch_posts`, `publish_post` / `publish_outbound`, `download_media`. New networks plug in by implementing these and registering handlers in `sync/engine.py`.
-
-## Configuration
-
-All settings live in `config.py`:
-
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `WATCH_INTERVAL_MINUTES` | `20` | How often watch mode polls X |
-| `POST_MIN_AGE_MINUTES` | `30` | Minimum source post age before publishing (watch mode) |
-| `BACKFILL_POST_DELAY_SECONDS` | `3` | Pause between posts during `--since` backfill |
-| `WATCH_MAX_PAGES` | `2` | Max X API pages per watch poll (~200 tweets) |
-| `WATCH_OVERLAP_HOURS` | `6` | Re-fetch window for threads and retries |
-| `WATCH_INITIAL_LOOKBACK_HOURS` | `48` | First watch run: how far back to look |
-
-Network routing:
-
-```python
-SYNC_PAIRS = [
-    ("twitter", "telegram"),   # source → destination
-    ("twitter", "mastodon"),
-]
-```
-
-Add more pairs here when new networks are implemented.
-
-## Database
-
-Everything is stored in `data/be_everywhere.db` (SQLite, created automatically):
+Two tables work together:
 
 | Table | Purpose |
 |-------|---------|
-| `credentials` | Bearer token, user ID, username, bot token, channel ID, Mastodon instance + token |
-| `posted` | `(source_network, source_post_id, destination_network)` — one row per successfully synced post |
-| `sync_state` | Last sync timestamp per source→destination pair |
+| `sync_mappings` | `(source_account, source_post) → dest_account` — "already propagated" |
+| `mirrored_posts` | `post_id` on an account that was **created by sync** — skipped on fetch |
 
-The database file is gitignored. Back it up if you migrate machines.
+When a Twitter thread `[A, B, C]` is merged into one Telegram message `X`:
 
-**Reset sync state** (re-post everything): delete `data/be_everywhere.db` and re-run `--auth`. There is no `--force` flag — duplicates are prevented by the `posted` table.
+- Three mapping rows: `A→X`, `B→X`, `C→X` (same dest post id)
+- One mirrored row: Telegram post `X`
+- Next run: Twitter posts are skipped for Telegram; Telegram post `X` is never fetched as new content
 
-## X API cost controls
+### Project structure
 
-Watch mode is optimized for app creators reading **only their own tweets**:
+```
+be-everywhere-bot/
+├── main.py                 # CLI: watch / --since / --auth / --list-accounts
+├── config.py               # Timing, network limits, paths
+├── apis/                   # One module per network (fetch + publish + auth)
+├── db/
+│   ├── accounts.py         # Multi-account credentials
+│   ├── sync_state.py       # Mappings, mirrored posts, sync watermarks
+│   └── migrations/         # Schema migrations (auto-applied)
+└── sync/
+    ├── engine.py           # Mesh sync orchestration
+    └── thread_processor.py # Thread merging, text splitting
+```
 
-- Uses `GET /users/{your_id}/tweets` — owned reads, not third-party lookups
-- Passes `start_time` so the API does not return ancient history
-- Caps pagination at `WATCH_MAX_PAGES` (2 pages ≈ 200 raw tweets per poll)
-- On first run, looks back only `WATCH_INITIAL_LOOKBACK_HOURS` (48h) — use `--since` for historical import
+## Configuration
 
-Typical watch poll: **1–2 API calls**, reading a handful to a few dozen tweets. Backfill cost scales with how many tweets exist since the given date.
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `POST_MIN_AGE_MINUTES` | `30` | Min post age before publishing (watch mode) |
+| `WATCH_INTERVAL_MINUTES` | `20` | Poll interval |
+| `BACKFILL_POST_DELAY_SECONDS` | `3` | Delay between posts in `--since` mode |
+| `WATCH_MAX_PAGES` | `2` | Max X API pages per poll |
+| `WATCH_OVERLAP_HOURS` | `6` | Re-fetch overlap for threads / retries |
+
+## Database migrations
+
+**You don't need a separate migrate step.** Every command that touches the database (`main.py` watch mode, `--auth`, `--since`, `--list-accounts`, etc.) calls `get_engine()`, which:
+
+1. Creates any missing tables
+2. Runs pending migrations from `db/migrations/versions/`
+3. Records applied versions in `schema_migrations`
+
+### Upgrading an existing install
+
+Pull the new code, rebuild Docker if you use it, then start as usual:
+
+```bash
+# Local
+uv sync
+uv run python main.py          # migrates, then watch mode
+
+# Docker
+docker compose build
+docker compose up -d           # migrates on container start
+```
+
+Migration `001_mesh_accounts` converts the old `credentials` / `posted` / `sync_state` tables to the new multi-account schema. Your data in `./data/be_everywhere.db` is preserved via the Docker volume.
+
+### Migrate only (no sync)
+
+```bash
+uv run python main.py --migrate
+
+docker compose run --rm bot uv run python main.py --migrate
+```
+
+Use `-v` to see `Applying migration …` log lines.
+
+## Database
+
+SQLite at `data/be_everywhere.db` (auto-created, migrated on startup):
+
+| Table | Purpose |
+|-------|---------|
+| `accounts` | Connected accounts (`network` + `label`) |
+| `account_credentials` | Tokens and settings per account |
+| `sync_mappings` | Propagation tracking (prevents re-sync) |
+| `mirrored_posts` | Sync-created posts (prevents circular repost) |
+| `account_sync_state` | Last fetch watermark per account |
+| `schema_migrations` | Applied migration versions |
+
+Legacy single-account schema is migrated automatically by `001_mesh_accounts`.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `X not configured` | Run `uv run python main.py --auth=twitter` |
-| `Telegram not configured` | Run `uv run python main.py --auth=telegram` |
-| `Mastodon not configured` | Run `uv run python main.py --auth=mastodon` |
-| HTTP 402 CreditsDepleted | Top up X API credits at [developer.x.com](https://developer.x.com/en/portal/dashboard) |
-| Post not published yet | It may be younger than 30 min (watch mode). Wait or use `--since` backfill |
-| Thread posted incomplete | Wait for all parts to pass min-age, or run backfill |
-| Telegram 429 rate limit | Automatic retry with backoff; backfill already has 3s delay between posts |
-| Missing old tweets in watch mode | Watch only covers recent window. Run `--since=YYYY-MM-DD` for history |
-
-Enable debug logging to see filter and pagination details:
+| No accounts configured | Run `--auth=…` for each network |
+| Post not synced yet | May be younger than 30 min in watch mode |
+| Telegram history missing | Bot API can't backfill channels; use `--since` on X/Mastodon |
+| Circular repost | Should not happen — check `mirrored_posts` is populated |
+| HTTP 402 on X | Top up API credits at developer.x.com |
 
 ```bash
-uv run python main.py -v
+uv run python main.py -v   # debug logging
 ```
 
 ## License

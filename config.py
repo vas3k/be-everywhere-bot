@@ -3,7 +3,7 @@ from pathlib import Path
 
 # --- Timing ---
 
-WATCH_INTERVAL_MINUTES = 20
+WATCH_INTERVAL_MINUTES = 30
 POST_MIN_AGE_MINUTES = 30
 BACKFILL_POST_DELAY_SECONDS = 3  # pause between posts during --since backfill
 
@@ -23,18 +23,13 @@ NETWORK_TWITTER = "twitter"
 NETWORK_TELEGRAM = "telegram"
 NETWORK_MASTODON = "mastodon"
 
-SOURCE_NETWORKS: list[str] = [NETWORK_TWITTER]
-DESTINATION_NETWORKS: list[str] = [NETWORK_TELEGRAM, NETWORK_MASTODON]
-
-SYNC_PAIRS: list[tuple[str, str]] = [
-    (source, dest) for source in SOURCE_NETWORKS for dest in DESTINATION_NETWORKS
-]
+NETWORKS: list[str] = [NETWORK_TWITTER, NETWORK_TELEGRAM, NETWORK_MASTODON]
 
 # --- App-level settings (no secrets) ---
 
 
 @dataclass(frozen=True)
-class DestinationLimits:
+class NetworkLimits:
     max_text: int
     max_caption: int
     max_media_group: int
@@ -53,14 +48,17 @@ class TelegramAppConfig:
 TWITTER_APP = TwitterAppConfig()
 TELEGRAM_APP = TelegramAppConfig()
 
-TELEGRAM_LIMITS = DestinationLimits(max_text=4096, max_caption=1024, max_media_group=4)
-MASTODON_LIMITS = DestinationLimits(max_text=500, max_caption=500, max_media_group=4)
+TELEGRAM_LIMITS = NetworkLimits(max_text=4096, max_caption=1024, max_media_group=4)
+MASTODON_LIMITS = NetworkLimits(max_text=500, max_caption=500, max_media_group=4)
 
-DESTINATION_LIMITS: dict[str, DestinationLimits] = {
+TWITTER_LIMITS = NetworkLimits(max_text=280, max_caption=280, max_media_group=4)
+
+NETWORK_LIMITS: dict[str, NetworkLimits] = {
     NETWORK_TELEGRAM: TELEGRAM_LIMITS,
     NETWORK_MASTODON: MASTODON_LIMITS,
+    NETWORK_TWITTER: TWITTER_LIMITS,
 }
 
 TWITTER_CREDENTIAL_KEYS = ("bearer_token", "user_id", "username")
 TELEGRAM_CREDENTIAL_KEYS = ("bot_token", "channel_id")
-MASTODON_CREDENTIAL_KEYS = ("instance_url", "access_token", "username")
+MASTODON_CREDENTIAL_KEYS = ("instance_url", "access_token", "username", "account_id")

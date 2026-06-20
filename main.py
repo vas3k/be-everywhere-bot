@@ -9,6 +9,7 @@ import apis.mastodon as mastodon_api
 import apis.telegram as telegram_api
 import apis.twitter as twitter_api
 from config import WATCH_INTERVAL_MINUTES
+from db.accounts import account_display_name, list_accounts
 from db.connection import get_engine
 from sync.engine import run_sync
 
@@ -27,10 +28,10 @@ def _parse_since(value: str) -> datetime:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Sync posts between social networks (X -> Telegram, Mastodon, ...).",
+        description="Mesh-sync posts across social networks.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""\
-auth setup:
+auth setup (use --label to connect multiple accounts per network):
 
 {twitter_api.AUTH_HELP}
 telegram:
@@ -42,16 +43,28 @@ telegram:
     parser.add_argument(
         "--since",
         type=_parse_since,
-        help="Backfill: post all source posts since this date (YYYY-MM-DD). Skips min-age filter.",
+        help="Backfill: sync posts since this date (YYYY-MM-DD). Skips min-age filter.",
     )
     parser.add_argument(
         "--auth",
         choices=["twitter", "telegram", "mastodon"],
         metavar="NETWORK",
-        help=(
-            "Configure a network and store credentials in SQLite "
-            "(see auth setup below)."
-        ),
+        help="Configure a network account and store credentials in SQLite.",
+    )
+    parser.add_argument(
+        "--label",
+        default="default",
+        help="Account label within a network (default: default). Use to add multiple accounts.",
+    )
+    parser.add_argument(
+        "--list-accounts",
+        action="store_true",
+        help="List configured accounts and exit.",
+    )
+    parser.add_argument(
+        "--migrate",
+        action="store_true",
+        help="Apply pending database migrations and exit.",
     )
     parser.add_argument(
         "-v",
@@ -80,14 +93,30 @@ async def watch_mode(engine) -> None:
 async def async_main(args: argparse.Namespace) -> None:
     engine = get_engine()
 
+    if args.migrate:
+        logging.info("Database migrations up to date: %s", engine.url)
+        return
+
+    if args.list_accounts:
+        accounts = list_accounts(engine)
+        if not accounts:
+            print("No accounts configured.")
+            return
+        for account in accounts:
+            print(
+                f"{account.id}: {account.network}/{account.label} "
+                f"({account_display_name(account, engine)})"
+            )
+        return
+
     if args.auth == "twitter":
-        await twitter_api.authenticate(engine)
+        await twitter_api.authenticate(engine, label=args.label)
         return
     if args.auth == "telegram":
-        await telegram_api.authenticate(engine)
+        await telegram_api.authenticate(engine, label=args.label)
         return
     if args.auth == "mastodon":
-        await mastodon_api.authenticate(engine)
+        await mastodon_api.authenticate(engine, label=args.label)
         return
 
     if args.since:

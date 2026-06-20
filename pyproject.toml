@@ -1,7 +1,7 @@
 [project]
 name = "be-everywhere-bot"
-version = "0.1.0"
-description = "Sync posts between social networks (Twitter, Telegram, ...)"
+version = "0.2.0"
+description = "Mesh-sync posts across social networks (Twitter, Telegram, Mastodon)"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
