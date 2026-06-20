@@ -1,16 +1,16 @@
 # be-everywhere-bot
 
-A small Python app that syncs your posts from **X (Twitter)** to **Telegram**. It polls your own timeline, filters out noise (replies, retweets, quotes), combines threads into readable messages, re-uploads media, and tracks what was already posted so nothing is duplicated.
+A small Python app that syncs your posts from **X (Twitter)** to **Telegram** and **Mastodon**. It polls your own timeline, filters out noise (replies, retweets, quotes), combines threads into readable messages, re-uploads media, and tracks what was already posted so nothing is duplicated.
 
 Designed to be extended: more source and destination networks can be added later without rewriting the core.
 
 ## Features
 
-- **X → Telegram sync** — text, photos, videos, and GIFs
+- **X → Telegram / Mastodon sync** — text, photos, videos, and GIFs
 - **Thread support** — consecutive tweets in the same conversation are merged into one or more Telegram messages, in order
 - **Smart filtering** — skips retweets, quote tweets, `@`-replies, and replies to other people
 - **Link unwrapping** — `t.co` and other shorteners are resolved to the real URL before posting
-- **Duplicate protection** — SQLite tracks every successfully synced tweet per destination
+- **Duplicate protection** — SQLite tracks every successfully synced post per destination
 - **Two run modes** — continuous watch (poll every 20 min) and one-shot backfill (`--since`)
 - **Credit-conscious** — watch mode only reads recent own tweets from the X API, not your full history every poll
 
@@ -20,6 +20,7 @@ Designed to be extended: more source and destination networks can be added later
 - **[uv](https://docs.astral.sh/uv/)** (recommended) or pip
 - An **X Developer account** with API credits ([developer.x.com](https://developer.x.com/en/portal/dashboard))
 - A **Telegram bot** ([@BotFather](https://t.me/BotFather)) with permission to post to your channel
+- A **Mastodon account** with an access token for your instance (optional)
 
 ## Quick start
 
@@ -31,6 +32,7 @@ uv sync
 # Configure credentials (interactive prompts, stored in SQLite)
 uv run python main.py --auth=twitter
 uv run python main.py --auth=telegram
+uv run python main.py --auth=mastodon
 
 # Run continuous sync
 uv run python main.py
@@ -80,6 +82,21 @@ The bot must be an **admin** of the channel with permission to post messages.
 
 To find a numeric channel ID: forward a channel post to [@userinfobot](https://t.me/userinfobot) or use the Telegram API.
 
+### 4. Configure Mastodon (optional)
+
+```bash
+uv run python main.py --auth=mastodon
+```
+
+You will be prompted for:
+
+| Field | Where to get it |
+|-------|-----------------|
+| **Instance URL** | Your server's base URL (e.g. `https://mastodon.social`) |
+| **Access Token** | Instance → **Preferences** → **Development** → your app → **Access token** |
+
+Create a new application with `read` + `write` scopes if you don't have one yet. The token is stored in `data/be_everywhere.db`.
+
 ## Running
 
 ```bash
@@ -94,7 +111,7 @@ uv run python main.py --help          # full CLI help + auth instructions
 Polls every **20 minutes**. For each cycle:
 
 1. Fetches your recent own tweets (see [API cost controls](#x-api-cost-controls))
-2. Skips tweets younger than **30 minutes** (so you can still edit or delete on X)
+2. Skips posts younger than **30 minutes** (so you can still edit or delete on X)
 3. Publishes anything not yet in the database
 4. Sleeps until the next cycle
 
@@ -102,7 +119,7 @@ Run this as a long-lived process (terminal, `tmux`, `systemd`, etc.).
 
 ### Backfill mode (`--since`)
 
-One-shot sync of all eligible tweets since the given date (UTC midnight):
+One-shot sync of all eligible posts since the given date (UTC midnight):
 
 ```bash
 uv run python main.py --since=2026-01-01
@@ -115,7 +132,7 @@ uv run python main.py --since=2026-06-01T12:00:00   # optional time
 
 ### Re-authenticate
 
-Credentials can be updated at any time by running `--auth=twitter` or `--auth=telegram` again.
+Credentials can be updated at any time by running `--auth=twitter`, `--auth=telegram`, or `--auth=mastodon` again.
 
 ### Docker
 
@@ -123,6 +140,7 @@ Credentials can be updated at any time by running `--auth=twitter` or `--auth=te
 # One-time auth (interactive prompts; writes to ./data/)
 docker compose run --rm bot uv run python main.py --auth=twitter
 docker compose run --rm bot uv run python main.py --auth=telegram
+docker compose run --rm bot uv run python main.py --auth=mastodon
 
 # Run watch mode in the background
 docker compose up -d
@@ -157,10 +175,12 @@ flowchart LR
 
     subgraph publish [Publish]
         TG["Telegram Bot API\nsendMessage / sendPhoto / …"]
+        M["Mastodon API\nstatuses + media"]
         DB["SQLite\nmark as posted"]
     end
 
     X --> Filter --> Group --> Thread --> URLs --> Media --> TG --> DB
+    Media --> M --> DB
 ```
 
 ### Sync pipeline
@@ -170,8 +190,8 @@ flowchart LR
 3. **Group** — tweets with the same `conversation_id` are treated as one thread.
 4. **Batch** — within each thread, unposted tweets are collected in chronological order. In watch mode, stops at the first tweet that is not yet old enough.
 5. **Transform** — thread text is joined with blank lines. Long text is split at paragraph/sentence boundaries to fit Telegram limits. Media is chunked into albums of up to 4 items.
-6. **Publish** — media is downloaded from X, `t.co` links in text are unwrapped, and messages are sent via the Telegram bot API (with automatic retry on HTTP 429).
-7. **Track** — each tweet ID is recorded in SQLite **only after** a successful publish. Failed posts stay unmarked and will be retried on the next cycle.
+6. **Publish** — media is downloaded from X, `t.co` links in text are unwrapped, and messages are sent to each configured destination (Telegram bot API, Mastodon statuses API).
+7. **Track** — each source post ID is recorded in SQLite **only after** a successful publish per destination. Failed posts stay unmarked and will be retried on the next cycle.
 
 ### What gets synced
 
@@ -195,20 +215,21 @@ be-everywhere-bot/
 │   ├── types.py            # Post, MediaItem, OutboundPost dataclasses
 │   ├── twitter.py          # X auth, fetch_posts, download_media
 │   ├── telegram.py         # Telegram auth, publish_outbound
+│   ├── mastodon.py          # Mastodon auth, publish_outbound
 │   └── urls.py             # Short-link unwrapping (t.co, bit.ly, …)
 │
 ├── db/
 │   ├── schema.py           # SQLAlchemy table definitions
 │   ├── connection.py       # SQLite engine + auto-create tables
 │   ├── credentials.py      # Store/read network tokens
-│   └── posts.py            # Posted-tweet tracking, sync state
+│   └── posts.py            # Posted-post tracking, sync state
 │
 ├── sync/
 │   ├── engine.py           # Orchestrates fetch → group → publish → mark
 │   └── thread_processor.py # Thread merging, text splitting, media chunking
 │
 ├── data/                   # Created at runtime (gitignored)
-│   └── be_everywhere.db    # Credentials + posted tweets + sync timestamps
+│   └── be_everywhere.db    # Credentials + posted posts + sync timestamps
 │
 ├── pyproject.toml
 └── uv.lock
@@ -223,6 +244,7 @@ be-everywhere-bot/
 | `sync/engine.py` | Core sync logic; maps source→destination pairs from `SYNC_PAIRS` |
 | `apis/twitter.py` | X API v2 client (Bearer token auth, timeline pagination) |
 | `apis/telegram.py` | Telegram Bot API client with rate-limit retry |
+| `apis/mastodon.py` | Mastodon REST API client (statuses + media upload) |
 | `db/posts.py` | `is_posted()`, `mark_posted()`, `get_last_synced_at()` |
 
 Each network module exposes the same async functions (no classes): `authenticate`, `fetch_posts`, `publish_post` / `publish_outbound`, `download_media`. New networks plug in by implementing these and registering handlers in `sync/engine.py`.
@@ -234,7 +256,7 @@ All settings live in `config.py`:
 | Constant | Default | Description |
 |----------|---------|-------------|
 | `WATCH_INTERVAL_MINUTES` | `20` | How often watch mode polls X |
-| `TWEET_MIN_AGE_MINUTES` | `30` | Minimum tweet age before posting (watch mode) |
+| `POST_MIN_AGE_MINUTES` | `30` | Minimum source post age before publishing (watch mode) |
 | `BACKFILL_POST_DELAY_SECONDS` | `3` | Pause between posts during `--since` backfill |
 | `WATCH_MAX_PAGES` | `2` | Max X API pages per watch poll (~200 tweets) |
 | `WATCH_OVERLAP_HOURS` | `6` | Re-fetch window for threads and retries |
@@ -245,6 +267,7 @@ Network routing:
 ```python
 SYNC_PAIRS = [
     ("twitter", "telegram"),   # source → destination
+    ("twitter", "mastodon"),
 ]
 ```
 
@@ -256,8 +279,8 @@ Everything is stored in `data/be_everywhere.db` (SQLite, created automatically):
 
 | Table | Purpose |
 |-------|---------|
-| `credentials` | Bearer token, user ID, username, bot token, channel ID |
-| `posted` | `(source_network, source_post_id, destination_network)` — one row per successfully synced tweet |
+| `credentials` | Bearer token, user ID, username, bot token, channel ID, Mastodon instance + token |
+| `posted` | `(source_network, source_post_id, destination_network)` — one row per successfully synced post |
 | `sync_state` | Last sync timestamp per source→destination pair |
 
 The database file is gitignored. Back it up if you migrate machines.
@@ -281,8 +304,9 @@ Typical watch poll: **1–2 API calls**, reading a handful to a few dozen tweets
 |---------|-----|
 | `X not configured` | Run `uv run python main.py --auth=twitter` |
 | `Telegram not configured` | Run `uv run python main.py --auth=telegram` |
+| `Mastodon not configured` | Run `uv run python main.py --auth=mastodon` |
 | HTTP 402 CreditsDepleted | Top up X API credits at [developer.x.com](https://developer.x.com/en/portal/dashboard) |
-| Tweet not posted yet | It may be younger than 30 min (watch mode). Wait or use `--since` backfill |
+| Post not published yet | It may be younger than 30 min (watch mode). Wait or use `--since` backfill |
 | Thread posted incomplete | Wait for all parts to pass min-age, or run backfill |
 | Telegram 429 rate limit | Automatic retry with backoff; backfill already has 3s delay between posts |
 | Missing old tweets in watch mode | Watch only covers recent window. Run `--since=YYYY-MM-DD` for history |

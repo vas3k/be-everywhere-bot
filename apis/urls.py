@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 # Hosts that wrap real destinations (extend as new sources are added)
 SHORTENER_HOSTS = frozenset(
     {
-        "t.co",  # X / Twitter — https://t.co
+        "t.co",
         "bit.ly",
         "buff.ly",
         "goo.gl",

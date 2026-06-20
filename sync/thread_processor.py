@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from apis.types import MediaItem, OutboundPost, Post
-from config import DESTINATION_LIMITS, TelegramAppConfig
+from config import DESTINATION_LIMITS, DestinationLimits, TELEGRAM_LIMITS
 
 
 def is_old_enough(post: Post, min_age_minutes: int) -> bool:
@@ -19,7 +19,7 @@ def collect_ready_batch(
     enforce_min_age: bool,
     min_age_minutes: int,
 ) -> list[Post]:
-    """Next unposted tweets in thread order; stops at first not old enough."""
+    """Next unposted source posts in thread order; stops at first not old enough."""
     batch: list[Post] = []
     for post in thread:
         if is_posted(post.id):
@@ -67,17 +67,17 @@ def _chunk(items: list[MediaItem], size: int) -> list[list[MediaItem]]:
 
 
 def build_outbound_posts(
-    tweets: list[Post],
-    limits: TelegramAppConfig | None = None,
+    posts: list[Post],
+    limits: DestinationLimits | None = None,
 ) -> list[OutboundPost]:
-    """Combine thread tweets into one or more destination posts."""
-    if not tweets:
+    """Combine thread posts into one or more destination posts."""
+    if not posts:
         return []
 
-    limits = limits or TelegramAppConfig()
-    source_ids = [t.id for t in tweets]
-    combined = "\n\n".join(t.text for t in tweets if t.text).strip()
-    media = [m for t in tweets for m in t.media]
+    limits = limits or TELEGRAM_LIMITS
+    source_ids = [p.id for p in posts]
+    combined = "\n\n".join(p.text for p in posts if p.text).strip()
+    media = [m for p in posts for m in p.media]
 
     if not media:
         if not combined:
@@ -109,7 +109,7 @@ def build_outbound_posts(
     return out
 
 
-def get_destination_limits(destination: str) -> TelegramAppConfig:
+def get_destination_limits(destination: str) -> DestinationLimits:
     if destination not in DESTINATION_LIMITS:
         raise ValueError(f"No limits configured for destination: {destination}")
     return DESTINATION_LIMITS[destination]

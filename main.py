@@ -5,6 +5,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 
+import apis.mastodon as mastodon_api
 import apis.telegram as telegram_api
 import apis.twitter as twitter_api
 from config import WATCH_INTERVAL_MINUTES
@@ -26,7 +27,7 @@ def _parse_since(value: str) -> datetime:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Sync posts between social networks (X -> Telegram).",
+        description="Sync posts between social networks (X -> Telegram, Mastodon, ...).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""\
 auth setup:
@@ -34,16 +35,18 @@ auth setup:
 {twitter_api.AUTH_HELP}
 telegram:
   Prompts for bot token (@BotFather) and channel ID (@channel or -100…).
+
+{mastodon_api.AUTH_HELP}
 """,
     )
     parser.add_argument(
         "--since",
         type=_parse_since,
-        help="Backfill: post all tweets since this date (YYYY-MM-DD). Skips min-age filter.",
+        help="Backfill: post all source posts since this date (YYYY-MM-DD). Skips min-age filter.",
     )
     parser.add_argument(
         "--auth",
-        choices=["twitter", "telegram"],
+        choices=["twitter", "telegram", "mastodon"],
         metavar="NETWORK",
         help=(
             "Configure a network and store credentials in SQLite "
@@ -66,7 +69,7 @@ async def watch_mode(engine) -> None:
     while True:
         try:
             count = await run_sync(engine, enforce_min_age=True)
-            logging.info("Sync cycle complete — %d tweet(s) synced", count)
+            logging.info("Sync cycle complete — %d post(s) synced", count)
         except Exception:
             logging.exception("Sync cycle failed")
 
@@ -83,10 +86,13 @@ async def async_main(args: argparse.Namespace) -> None:
     if args.auth == "telegram":
         await telegram_api.authenticate(engine)
         return
+    if args.auth == "mastodon":
+        await mastodon_api.authenticate(engine)
+        return
 
     if args.since:
         count = await run_sync(engine, since=args.since, enforce_min_age=False)
-        logging.info("Backfill complete — %d tweet(s) synced", count)
+        logging.info("Backfill complete — %d post(s) synced", count)
         return
 
     await watch_mode(engine)

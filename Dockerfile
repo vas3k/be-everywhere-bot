@@ -12,3 +12,4 @@ RUN uv sync --frozen --no-dev
 ENV PYTHONUNBUFFERED=1
 
 CMD ["uv", "run", "python", "main.py"]
+ 

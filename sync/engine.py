@@ -5,15 +5,18 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.engine import Engine
 
+import apis.mastodon as mastodon_api
 import apis.telegram as telegram_api
 import apis.twitter as twitter_api
 from apis.types import OutboundPost, Post
 from apis.urls import unwrap_posts_text
 from config import (
     BACKFILL_POST_DELAY_SECONDS,
+    NETWORK_MASTODON,
+    NETWORK_TELEGRAM,
     NETWORK_TWITTER,
+    POST_MIN_AGE_MINUTES,
     SYNC_PAIRS,
-    TWEET_MIN_AGE_MINUTES,
     WATCH_INITIAL_LOOKBACK_HOURS,
     WATCH_MAX_PAGES,
     WATCH_OVERLAP_HOURS,
@@ -28,7 +31,10 @@ from sync.thread_processor import (
 logger = logging.getLogger(__name__)
 
 FETCH_HANDLERS = {NETWORK_TWITTER: twitter_api.fetch_posts}
-PUBLISH_HANDLERS = {"telegram": telegram_api.publish_outbound}
+PUBLISH_HANDLERS = {
+    NETWORK_TELEGRAM: telegram_api.publish_outbound,
+    NETWORK_MASTODON: mastodon_api.publish_outbound,
+}
 DOWNLOAD_HANDLERS = {NETWORK_TWITTER: twitter_api.download_media}
 
 
@@ -56,16 +62,18 @@ def _group_by_conversation(posts: list[Post]) -> list[list[Post]]:
 
 
 async def _download_media_flat(
-    engine: Engine, source_network: str, tweets: list[Post]
+    engine: Engine, source_network: str, posts: list[Post]
 ) -> list[bytes]:
-    if source_network != NETWORK_TWITTER:
+    if source_network not in DOWNLOAD_HANDLERS:
         return []
-    token = twitter_api.get_bearer_token(engine)
     download = DOWNLOAD_HANDLERS[source_network]
+    token = ""
+    if source_network == NETWORK_TWITTER:
+        token = twitter_api.get_bearer_token(engine)
     return [
         await download(item, token)
-        for tweet in tweets
-        for item in tweet.media
+        for post in posts
+        for item in post.media
     ]
 
 
@@ -83,6 +91,7 @@ def _slice_media_bytes(
 
 async def _publish_batch(
     engine: Engine,
+    source: str,
     destination: str,
     batch: list[Post],
     limits,
@@ -93,7 +102,7 @@ async def _publish_batch(
     await unwrap_posts_text(batch)
 
     outbounds = build_outbound_posts(batch, limits)
-    all_bytes = await _download_media_flat(engine, NETWORK_TWITTER, batch)
+    all_bytes = await _download_media_flat(engine, source, batch)
     media_slices = _slice_media_bytes(outbounds, all_bytes)
 
     first_dest_id = ""
@@ -113,20 +122,24 @@ async def sync_pair(
     destination: str,
     since: datetime | None = None,
     enforce_min_age: bool = True,
-    min_age_minutes: int = TWEET_MIN_AGE_MINUTES,
+    min_age_minutes: int = POST_MIN_AGE_MINUTES,
     post_delay_seconds: float = 0,
 ) -> int:
     fetch_since = _fetch_since(engine, source, destination, since)
     max_pages = None if since is not None else WATCH_MAX_PAGES
     if max_pages:
         logger.info(
-            "Fetching own tweets since %s (max %d API page(s))",
+            "[%s -> %s] Fetching posts since %s (max %d API page(s))",
+            source,
+            destination,
             fetch_since.strftime("%Y-%m-%d %H:%M UTC"),
             max_pages,
         )
     else:
         logger.info(
-            "Backfill: fetching own tweets since %s",
+            "[%s -> %s] Backfill: fetching posts since %s",
+            source,
+            destination,
             fetch_since.strftime("%Y-%m-%d %H:%M UTC"),
         )
     posts = await FETCH_HANDLERS[source](
@@ -139,7 +152,9 @@ async def sync_pair(
         1 for p in posts if not is_posted(engine, source, p.id, destination)
     )
     logger.info(
-        "Eligible: %d tweet(s), already synced: %d, to sync: %d",
+        "[%s -> %s] Eligible: %d post(s), already synced: %d, to sync: %d",
+        source,
+        destination,
         len(posts),
         len(posts) - to_sync,
         to_sync,
@@ -154,41 +169,50 @@ async def sync_pair(
     for thread in _group_by_conversation(posts):
         batch = collect_ready_batch(
             thread,
-            is_posted=lambda tid: is_posted(engine, source, tid, destination),
+            is_posted=lambda pid: is_posted(engine, source, pid, destination),
             enforce_min_age=enforce_min_age,
             min_age_minutes=min_age_minutes,
         )
         if not batch:
             continue
 
-        tweet_ids = ", ".join(t.id for t in batch)
+        post_ids = ", ".join(p.id for p in batch)
         try:
             dest_id = await _publish_batch(
-                engine, destination, batch, limits, post_delay_seconds
+                engine, source, destination, batch, limits, post_delay_seconds
             )
         except Exception:
             logger.exception(
-                "Publish failed for tweet(s) %s — left unsynced, will retry later",
-                tweet_ids,
+                "[%s -> %s] Publish failed for post(s) %s — left unsynced, will retry later",
+                source,
+                destination,
+                post_ids,
             )
             if post_delay_seconds > 0:
                 await asyncio.sleep(post_delay_seconds)
             continue
 
         if not dest_id:
-            logger.error("No destination id for tweet(s) %s — left unsynced", tweet_ids)
+            logger.error(
+                "[%s -> %s] No destination id for post(s) %s — left unsynced",
+                source,
+                destination,
+                post_ids,
+            )
             continue
 
-        for tweet in batch:
+        for post in batch:
             if mark_posted(
                 engine,
                 source_network=source,
-                source_post_id=tweet.id,
+                source_post_id=post.id,
                 destination_network=destination,
                 destination_post_id=dest_id,
             ):
                 synced += 1
-                logger.info("Synced %s:%s -> %s:%s", source, tweet.id, destination, dest_id)
+                logger.info(
+                    "Synced %s:%s -> %s:%s", source, post.id, destination, dest_id
+                )
 
         if post_delay_seconds > 0:
             await asyncio.sleep(post_delay_seconds)

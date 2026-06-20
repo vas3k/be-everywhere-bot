@@ -4,11 +4,11 @@ from pathlib import Path
 # --- Timing ---
 
 WATCH_INTERVAL_MINUTES = 20
-TWEET_MIN_AGE_MINUTES = 30
+POST_MIN_AGE_MINUTES = 30
 BACKFILL_POST_DELAY_SECONDS = 3  # pause between posts during --since backfill
 
-# Watch mode: only fetch recent own tweets (owned reads are $0.001/tweet on X API)
-WATCH_MAX_PAGES = 2  # cap API pages per poll (~200 raw tweets max)
+# Watch mode: only fetch recent own posts (owned reads are $0.001/post on X API)
+WATCH_MAX_PAGES = 2  # cap API pages per poll (~200 raw posts max)
 WATCH_OVERLAP_HOURS = 6  # re-fetch window for threads / failed publishes
 WATCH_INITIAL_LOOKBACK_HOURS = 48  # first run before any sync state exists
 
@@ -21,15 +21,23 @@ DATABASE_PATH = BASE_DIR / "data" / "be_everywhere.db"
 
 NETWORK_TWITTER = "twitter"
 NETWORK_TELEGRAM = "telegram"
+NETWORK_MASTODON = "mastodon"
 
 SOURCE_NETWORKS: list[str] = [NETWORK_TWITTER]
-DESTINATION_NETWORKS: list[str] = [NETWORK_TELEGRAM]
+DESTINATION_NETWORKS: list[str] = [NETWORK_TELEGRAM, NETWORK_MASTODON]
 
 SYNC_PAIRS: list[tuple[str, str]] = [
     (source, dest) for source in SOURCE_NETWORKS for dest in DESTINATION_NETWORKS
 ]
 
 # --- App-level settings (no secrets) ---
+
+
+@dataclass(frozen=True)
+class DestinationLimits:
+    max_text: int
+    max_caption: int
+    max_media_group: int
 
 
 @dataclass(frozen=True)
@@ -40,17 +48,19 @@ class TwitterAppConfig:
 @dataclass(frozen=True)
 class TelegramAppConfig:
     api_base: str = "https://api.telegram.org"
-    max_text: int = 4096
-    max_caption: int = 1024
-    max_media_group: int = 4
 
 
 TWITTER_APP = TwitterAppConfig()
 TELEGRAM_APP = TelegramAppConfig()
 
-DESTINATION_LIMITS: dict[str, TelegramAppConfig] = {
-    NETWORK_TELEGRAM: TELEGRAM_APP,
+TELEGRAM_LIMITS = DestinationLimits(max_text=4096, max_caption=1024, max_media_group=4)
+MASTODON_LIMITS = DestinationLimits(max_text=500, max_caption=500, max_media_group=4)
+
+DESTINATION_LIMITS: dict[str, DestinationLimits] = {
+    NETWORK_TELEGRAM: TELEGRAM_LIMITS,
+    NETWORK_MASTODON: MASTODON_LIMITS,
 }
 
 TWITTER_CREDENTIAL_KEYS = ("bearer_token", "user_id", "username")
 TELEGRAM_CREDENTIAL_KEYS = ("bot_token", "channel_id")
+MASTODON_CREDENTIAL_KEYS = ("instance_url", "access_token", "username")

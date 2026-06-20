@@ -11,7 +11,7 @@ class MediaItem:
 
 @dataclass
 class Post:
-    """A single item from a source network (e.g. one tweet)."""
+    """A single item from a source network (e.g. one tweet or toot)."""
 
     id: str
     text: str
