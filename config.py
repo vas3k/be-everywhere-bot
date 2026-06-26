@@ -22,8 +22,21 @@ DATABASE_PATH = BASE_DIR / "data" / "be_everywhere.db"
 NETWORK_TWITTER = "twitter"
 NETWORK_TELEGRAM = "telegram"
 NETWORK_MASTODON = "mastodon"
+NETWORK_THREADS = "threads"
+NETWORK_BLUESKY = "bluesky"
+NETWORK_RSS = "rss"
 
-NETWORKS: list[str] = [NETWORK_TWITTER, NETWORK_TELEGRAM, NETWORK_MASTODON]
+NETWORKS: list[str] = [
+    NETWORK_TWITTER,
+    NETWORK_TELEGRAM,
+    NETWORK_MASTODON,
+    NETWORK_THREADS,
+    NETWORK_BLUESKY,
+    NETWORK_RSS,
+]
+
+# Read-only sources — mesh sync publishes from these but never to them.
+SOURCE_ONLY_NETWORKS: frozenset[str] = frozenset({NETWORK_RSS})
 
 # --- App-level settings (no secrets) ---
 
@@ -45,20 +58,40 @@ class TelegramAppConfig:
     api_base: str = "https://api.telegram.org"
 
 
+@dataclass(frozen=True)
+class ThreadsAppConfig:
+    api_base_url: str = "https://graph.threads.net/v1.0"
+
+
+@dataclass(frozen=True)
+class BlueskyAppConfig:
+    default_pds: str = "https://bsky.social"
+
+
 TWITTER_APP = TwitterAppConfig()
 TELEGRAM_APP = TelegramAppConfig()
+THREADS_APP = ThreadsAppConfig()
+BLUESKY_APP = BlueskyAppConfig()
 
 TELEGRAM_LIMITS = NetworkLimits(max_text=4096, max_caption=1024, max_media_group=4)
 MASTODON_LIMITS = NetworkLimits(max_text=500, max_caption=500, max_media_group=4)
 
 TWITTER_LIMITS = NetworkLimits(max_text=280, max_caption=280, max_media_group=4)
 
+THREADS_LIMITS = NetworkLimits(max_text=500, max_caption=500, max_media_group=20)
+BLUESKY_LIMITS = NetworkLimits(max_text=300, max_caption=300, max_media_group=4)
+
 NETWORK_LIMITS: dict[str, NetworkLimits] = {
     NETWORK_TELEGRAM: TELEGRAM_LIMITS,
     NETWORK_MASTODON: MASTODON_LIMITS,
     NETWORK_TWITTER: TWITTER_LIMITS,
+    NETWORK_THREADS: THREADS_LIMITS,
+    NETWORK_BLUESKY: BLUESKY_LIMITS,
 }
 
 TWITTER_CREDENTIAL_KEYS = ("bearer_token", "user_id", "username")
 TELEGRAM_CREDENTIAL_KEYS = ("bot_token", "channel_id")
 MASTODON_CREDENTIAL_KEYS = ("instance_url", "access_token", "username", "account_id")
+THREADS_CREDENTIAL_KEYS = ("access_token", "user_id", "username")
+BLUESKY_CREDENTIAL_KEYS = ("handle", "did", "access_jwt", "refresh_jwt", "pds_url")
+RSS_CREDENTIAL_KEYS = ("feed_url",)

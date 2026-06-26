@@ -14,4 +14,7 @@ services:
     #   docker compose run --rm bot uv run python main.py --auth=twitter
     #   docker compose run --rm bot uv run python main.py --auth=telegram
     #   docker compose run --rm bot uv run python main.py --auth=mastodon
+    #   docker compose run --rm bot uv run python main.py --auth=threads
+    #   docker compose run --rm bot uv run python main.py --auth=bluesky
+    #   docker compose run --rm bot uv run python main.py --auth=rss
     #   docker compose run --rm bot uv run python main.py --since=2026-01-01

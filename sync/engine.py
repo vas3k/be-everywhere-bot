@@ -5,17 +5,24 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.engine import Engine
 
+import apis.bluesky as bluesky_api
 import apis.mastodon as mastodon_api
+import apis.rss as rss_api
 import apis.telegram as telegram_api
+import apis.threads as threads_api
 import apis.twitter as twitter_api
 from apis.types import OutboundPost, Post
 from apis.urls import unwrap_posts_text
 from config import (
     BACKFILL_POST_DELAY_SECONDS,
+    NETWORK_BLUESKY,
     NETWORK_MASTODON,
+    NETWORK_RSS,
     NETWORK_TELEGRAM,
+    NETWORK_THREADS,
     NETWORK_TWITTER,
     POST_MIN_AGE_MINUTES,
+    SOURCE_ONLY_NETWORKS,
     WATCH_INITIAL_LOOKBACK_HOURS,
     WATCH_MAX_PAGES,
     WATCH_OVERLAP_HOURS,
@@ -41,16 +48,24 @@ FETCH_HANDLERS = {
     NETWORK_TWITTER: twitter_api.fetch_posts,
     NETWORK_TELEGRAM: telegram_api.fetch_posts,
     NETWORK_MASTODON: mastodon_api.fetch_posts,
+    NETWORK_THREADS: threads_api.fetch_posts,
+    NETWORK_BLUESKY: bluesky_api.fetch_posts,
+    NETWORK_RSS: rss_api.fetch_posts,
 }
 PUBLISH_HANDLERS = {
     NETWORK_TWITTER: twitter_api.publish_outbound,
     NETWORK_TELEGRAM: telegram_api.publish_outbound,
     NETWORK_MASTODON: mastodon_api.publish_outbound,
+    NETWORK_THREADS: threads_api.publish_outbound,
+    NETWORK_BLUESKY: bluesky_api.publish_outbound,
 }
 DOWNLOAD_HANDLERS = {
     NETWORK_TWITTER: twitter_api.download_media,
     NETWORK_TELEGRAM: telegram_api.download_media,
     NETWORK_MASTODON: mastodon_api.download_media,
+    NETWORK_THREADS: threads_api.download_media,
+    NETWORK_BLUESKY: bluesky_api.download_media,
+    NETWORK_RSS: rss_api.download_media,
 }
 
 
@@ -83,6 +98,14 @@ def _filter_original_posts(posts: list[Post], mirrored_ids: set[str]) -> list[Po
     if skipped:
         logger.info("Skipped %d mirrored post(s) created by sync", skipped)
     return filtered
+
+
+def _destination_accounts(source: Account, all_accounts: list[Account]) -> list[Account]:
+    return [
+        account
+        for account in all_accounts
+        if account.id != source.id and account.network not in SOURCE_ONLY_NETWORKS
+    ]
 
 
 async def _download_media_flat(
@@ -125,8 +148,28 @@ async def _publish_batch(
     media_slices = _slice_media_bytes(outbounds, all_bytes)
 
     dest_ids: list[str] = []
+    reply_to_id: str | None = None
+    bluesky_reply_to: tuple[str, str] | None = None
     for i, (outbound, bytes_chunk) in enumerate(zip(outbounds, media_slices)):
-        dest_id = await publish(engine, dest.id, outbound, bytes_chunk)
+        if dest.network == NETWORK_THREADS:
+            dest_id = await threads_api.publish_outbound(
+                engine,
+                dest.id,
+                outbound,
+                bytes_chunk,
+                reply_to_id=reply_to_id,
+            )
+            reply_to_id = dest_id
+        elif dest.network == NETWORK_BLUESKY:
+            dest_id, bluesky_reply_to = await bluesky_api.publish_outbound(
+                engine,
+                dest.id,
+                outbound,
+                bytes_chunk,
+                reply_to=bluesky_reply_to,
+            )
+        else:
+            dest_id = await publish(engine, dest.id, outbound, bytes_chunk)
         dest_ids.append(dest_id)
         if post_delay_seconds > 0 and i < len(outbounds) - 1:
             await asyncio.sleep(post_delay_seconds)
@@ -171,28 +214,34 @@ async def sync_account(
     min_age_minutes: int = POST_MIN_AGE_MINUTES,
     post_delay_seconds: float = 0,
 ) -> int:
-    dest_accounts = [a for a in all_accounts if a.id != source.id]
+    dest_accounts = _destination_accounts(source, all_accounts)
     if not dest_accounts:
         logger.info(
-            "[%s] No other accounts configured — nothing to sync",
+            "[%s] No publishable accounts configured — nothing to sync",
             account_display_name(source, engine),
         )
         return 0
 
     fetch_since = _fetch_since(engine, source, since)
-    max_pages = None if since is not None else WATCH_MAX_PAGES
+    max_pages = None if since is not None or source.network == NETWORK_RSS else WATCH_MAX_PAGES
     source_name = account_display_name(source, engine)
 
-    if max_pages:
+    if max_pages and source.network != NETWORK_RSS:
         logger.info(
             "[%s] Fetching posts since %s (max %d API page(s))",
             source_name,
             fetch_since.strftime("%Y-%m-%d %H:%M UTC") if fetch_since else "all",
             max_pages,
         )
-    else:
+    elif since is not None:
         logger.info(
             "[%s] Backfill: fetching posts since %s",
+            source_name,
+            fetch_since.strftime("%Y-%m-%d %H:%M UTC") if fetch_since else "all",
+        )
+    else:
+        logger.info(
+            "[%s] Fetching posts since %s",
             source_name,
             fetch_since.strftime("%Y-%m-%d %H:%M UTC") if fetch_since else "all",
         )
@@ -283,7 +332,7 @@ async def run_sync(
     accounts = list_accounts(engine)
     if not accounts:
         logger.warning(
-            "No accounts configured. Run --auth=twitter/telegram/mastodon first."
+            "No accounts configured. Run --auth for at least one network."
         )
         return 0
 

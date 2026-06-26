@@ -1,7 +1,7 @@
 [project]
 name = "be-everywhere-bot"
 version = "0.2.0"
-description = "Mesh-sync posts across social networks (Twitter, Telegram, Mastodon)"
+description = "Mesh-sync posts across social networks and RSS feeds"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

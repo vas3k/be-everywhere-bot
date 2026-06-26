@@ -116,6 +116,15 @@ def set_credentials(engine: Engine, account_id: int, values: dict[str, str]) -> 
         set_credential(engine, account_id, key, value)
 
 
+def update_remote_id(engine: Engine, account_id: int, remote_id: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            update(accounts)
+            .where(accounts.c.id == account_id)
+            .values(remote_id=remote_id)
+        )
+
+
 def delete_account_credentials(engine: Engine, account_id: int) -> None:
     with engine.begin() as conn:
         conn.execute(
@@ -141,4 +150,16 @@ def account_display_name(account: Account, engine: Engine) -> str:
         if username and instance:
             host = instance.removeprefix("https://").removeprefix("http://").rstrip("/")
             return f"@{username}@{host}"
+    if account.network == "threads":
+        username = creds.get("username")
+        if username:
+            return f"@{username}"
+    if account.network == "bluesky":
+        handle = creds.get("handle")
+        if handle:
+            return f"@{handle}"
+    if account.network == "rss":
+        feed_url = creds.get("feed_url")
+        if feed_url:
+            return feed_url
     return f"{account.network}:{account.label}"

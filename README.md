@@ -1,6 +1,6 @@
 # be-everywhere-bot
 
-A small Python app that **mesh-syncs** your posts across **X (Twitter)**, **Telegram**, and **Mastodon**. When a new post appears on any connected account, it is reposted to every other account. The bot tracks what was already synced so nothing is duplicated — including posts it created itself (so a Twitter thread reposted to Telegram is never echoed back to Twitter).
+A small Python app that **mesh-syncs** your posts across **X (Twitter)**, **Threads**, **Bluesky**, **Telegram**, **Mastodon**, and **RSS feeds**. When a new post appears on any connected account, it is reposted to every other account. The bot tracks what was already synced so nothing is duplicated — including posts it created itself (so a Twitter thread reposted to Telegram is never echoed back to Twitter).
 
 ## Features
 
@@ -30,9 +30,9 @@ uv sync
 uv run python main.py --auth=twitter
 uv run python main.py --auth=telegram
 uv run python main.py --auth=mastodon
-
-# List connected accounts
-uv run python main.py --list-accounts
+uv run python main.py --auth=threads
+uv run python main.py --auth=bluesky
+uv run python main.py --auth=rss
 
 # Run continuous mesh sync
 uv run python main.py
@@ -47,6 +47,9 @@ uv run python main.py --auth=twitter --label=personal
 uv run python main.py --auth=twitter --label=work
 uv run python main.py --auth=telegram --label=main
 uv run python main.py --auth=mastodon --label=fedi
+uv run python main.py --auth=threads --label=main
+uv run python main.py --auth=bluesky --label=main
+uv run python main.py --auth=rss --label=blog
 ```
 
 Re-running `--auth` with the same network + label updates credentials.
@@ -62,6 +65,27 @@ Bot token from [@BotFather](https://t.me/BotFather) and channel ID (`@channel` o
 ### Mastodon
 
 Instance URL and access token (Preferences → Development → your app). Needs `read` + `write` scopes.
+
+### Threads
+
+Access token from [developers.facebook.com](https://developers.facebook.com/apps/) with scopes `threads_basic` and `threads_content_publish`. Username is auto-detected from the token.
+
+**Note:** Threads API requires media to be on a **public HTTPS URL** when publishing images/videos. Posts synced from X/Mastodon usually work; Telegram-sourced media may publish as text-only.
+
+### Bluesky
+
+Handle and **app password** from Bluesky Settings → Privacy and security → App passwords (not your login password). Supports direct blob upload for images and videos.
+
+### RSS (one-way)
+
+Feed URL for any RSS 2.0 or Atom feed. Each item is published as **title**, **description/summary**, and a **link** to the original post.
+
+```bash
+uv run python main.py --auth=rss --label=blog
+# prompts for https://example.com/feed.xml
+```
+
+Use `--since=YYYY-MM-DD` to import older feed items on first run.
 
 ## Running
 
@@ -91,6 +115,9 @@ One-shot sync since the given date. Skips min-age filter, adds a **3 second dela
 docker compose run --rm bot uv run python main.py --auth=twitter
 docker compose run --rm bot uv run python main.py --auth=telegram
 docker compose run --rm bot uv run python main.py --auth=mastodon
+docker compose run --rm bot uv run python main.py --auth=threads
+docker compose run --rm bot uv run python main.py --auth=bluesky
+docker compose run --rm bot uv run python main.py --auth=rss
 docker compose up -d
 ```
 
@@ -102,6 +129,9 @@ flowchart TB
         TW["Twitter @you"]
         TG["Telegram channel"]
         M["Mastodon @you"]
+        TH["Threads @you"]
+        BS["Bluesky @you"]
+        RSS["RSS feed"]
     end
 
     subgraph sync [Each sync cycle]
@@ -113,6 +143,9 @@ flowchart TB
     TW --> Fetch
     TG --> Fetch
     M --> Fetch
+    TH --> Fetch
+    BS --> Fetch
+    RSS --> Fetch
     Fetch --> Fan --> Map
 ```
 

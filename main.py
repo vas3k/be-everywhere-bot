@@ -5,8 +5,11 @@ import logging
 import sys
 from datetime import datetime, timezone
 
+import apis.bluesky as bluesky_api
 import apis.mastodon as mastodon_api
+import apis.rss as rss_api
 import apis.telegram as telegram_api
+import apis.threads as threads_api
 import apis.twitter as twitter_api
 from config import WATCH_INTERVAL_MINUTES
 from db.accounts import account_display_name, list_accounts
@@ -38,6 +41,9 @@ telegram:
   Prompts for bot token (@BotFather) and channel ID (@channel or -100…).
 
 {mastodon_api.AUTH_HELP}
+{threads_api.AUTH_HELP}
+{bluesky_api.AUTH_HELP}
+{rss_api.AUTH_HELP}
 """,
     )
     parser.add_argument(
@@ -47,7 +53,7 @@ telegram:
     )
     parser.add_argument(
         "--auth",
-        choices=["twitter", "telegram", "mastodon"],
+        choices=["twitter", "telegram", "mastodon", "threads", "bluesky", "rss"],
         metavar="NETWORK",
         help="Configure a network account and store credentials in SQLite.",
     )
@@ -117,6 +123,15 @@ async def async_main(args: argparse.Namespace) -> None:
         return
     if args.auth == "mastodon":
         await mastodon_api.authenticate(engine, label=args.label)
+        return
+    if args.auth == "threads":
+        await threads_api.authenticate(engine, label=args.label)
+        return
+    if args.auth == "bluesky":
+        await bluesky_api.authenticate(engine, label=args.label)
+        return
+    if args.auth == "rss":
+        await rss_api.authenticate(engine, label=args.label)
         return
 
     if args.since:
