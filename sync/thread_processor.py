@@ -86,30 +86,21 @@ def _chunk(items: list[MediaItem], size: int) -> list[list[MediaItem]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def build_outbound_posts(
-    posts: list[Post],
-    limits: NetworkLimits | None = None,
-) -> list[OutboundPost]:
-    """Combine thread posts into one or more outbound messages."""
-    if not posts:
-        return []
-
-    posts = sort_chronologically(posts)
-    limits = limits or TELEGRAM_LIMITS
-    source_ids = [p.id for p in posts]
-    combined = "\n\n".join(p.text for p in posts if p.text).strip()
-    media = [m for p in posts for m in p.media]
+def _outbound_for_single_post(post: Post, limits: NetworkLimits) -> list[OutboundPost]:
+    source_ids = [post.id]
+    text = (post.text or "").strip()
+    media = list(post.media)
 
     if not media:
-        if not combined:
+        if not text:
             return [OutboundPost(text="", source_post_ids=source_ids)]
         return [
             OutboundPost(text=chunk, source_post_ids=source_ids)
-            for chunk in split_text(combined, limits.max_text)
+            for chunk in split_text(text, limits.max_text)
         ]
 
     out: list[OutboundPost] = []
-    text_remaining = combined
+    text_remaining = text
 
     for batch in _chunk(media, limits.max_media_group):
         caption = ""
@@ -119,7 +110,9 @@ def build_outbound_posts(
             else:
                 parts = split_text(text_remaining, limits.max_caption)
                 caption = parts[0]
-                text_remaining = "\n\n".join(parts[1:]).strip() if len(parts) > 1 else ""
+                text_remaining = (
+                    "\n\n".join(parts[1:]).strip() if len(parts) > 1 else ""
+                )
         out.append(
             OutboundPost(text=caption, media=batch, source_post_ids=source_ids)
         )
@@ -127,6 +120,21 @@ def build_outbound_posts(
     for chunk in split_text(text_remaining, limits.max_text):
         out.append(OutboundPost(text=chunk, source_post_ids=source_ids))
 
+    return out
+
+
+def build_outbound_posts(
+    posts: list[Post],
+    limits: NetworkLimits | None = None,
+) -> list[OutboundPost]:
+    """Split source posts into ordered outbound messages sized for destination limits."""
+    if not posts:
+        return []
+
+    limits = limits or TELEGRAM_LIMITS
+    out: list[OutboundPost] = []
+    for post in sort_chronologically(posts):
+        out.extend(_outbound_for_single_post(post, limits))
     return out
 
 

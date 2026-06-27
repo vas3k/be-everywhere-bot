@@ -482,6 +482,25 @@ async def download_media(
         return response.content
 
 
+async def resolve_reply_target(
+    engine: Engine, account_id: int, post_id: str
+) -> tuple[str, str]:
+    """Resolve a stored Bluesky post id (rkey) to (uri, cid) for reply chaining."""
+    creds = _require_creds(engine, account_id)
+    did = creds["did"]
+    uri = f"at://{did}/app.bsky.feed.post/{post_id}"
+    record = await _api_get(
+        creds["pds_url"],
+        creds["access_jwt"],
+        "com.atproto.repo.getRecord",
+        {"repo": did, "collection": "app.bsky.feed.post", "rkey": post_id},
+    )
+    cid = record.get("cid")
+    if not cid:
+        raise RuntimeError(f"Bluesky getRecord: missing cid for {uri}")
+    return uri, cid
+
+
 async def publish_outbound(
     engine: Engine,
     account_id: int,

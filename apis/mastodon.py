@@ -355,7 +355,7 @@ async def publish_outbound(
         if media_ids:
             payload["media_ids"] = media_ids
         if in_reply_to_id:
-            payload["in_reply_to_id"] = in_reply_to_id
+            payload["in_reply_to_id"] = int(in_reply_to_id)
 
         response = await client.post(
             f"{instance_url}/api/v1/statuses",

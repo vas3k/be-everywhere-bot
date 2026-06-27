@@ -23,6 +23,23 @@ def is_synced(
         return conn.execute(stmt).first() is not None
 
 
+def get_dest_post_id(
+    engine: Engine,
+    source_account_id: int,
+    source_post_id: str,
+    dest_account_id: int,
+) -> str | None:
+    stmt = (
+        select(sync_mappings.c.dest_post_id)
+        .where(sync_mappings.c.source_account_id == source_account_id)
+        .where(sync_mappings.c.source_post_id == source_post_id)
+        .where(sync_mappings.c.dest_account_id == dest_account_id)
+    )
+    with engine.connect() as conn:
+        row = conn.execute(stmt).first()
+    return row[0] if row else None
+
+
 def mark_synced(
     engine: Engine,
     source_account_id: int,

@@ -38,8 +38,6 @@ NETWORKS: list[str] = [
 # Read-only sources — mesh sync publishes from these but never to them.
 SOURCE_ONLY_NETWORKS: frozenset[str] = frozenset({NETWORK_RSS})
 
-# --- App-level settings (no secrets) ---
-
 
 @dataclass(frozen=True)
 class NetworkLimits:

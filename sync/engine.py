@@ -29,6 +29,7 @@ from config import (
 )
 from db.accounts import Account, account_display_name, list_accounts
 from db.sync_state import (
+    get_dest_post_id,
     get_last_synced_at,
     get_mirrored_post_ids,
     is_synced,
@@ -132,25 +133,81 @@ def _slice_media_bytes(
     return sliced
 
 
+def _dest_id_per_source_post(
+    outbounds: list[OutboundPost], dest_ids: list[str]
+) -> dict[str, str]:
+    """Map each source post id to the last dest id published for it."""
+    mapping: dict[str, str] = {}
+    for outbound, dest_id in zip(outbounds, dest_ids):
+        for source_id in outbound.source_post_ids:
+            mapping[source_id] = dest_id
+    return mapping
+
+
+async def _chain_anchor(
+    engine: Engine,
+    source: Account,
+    dest: Account,
+    thread: list[Post],
+    batch: list[Post],
+) -> tuple[str | None, tuple[str, str] | None]:
+    """Reply target when this batch continues a partially synced conversation."""
+    if not batch:
+        return None, None
+
+    ordered = sort_chronologically(thread)
+    first_id = batch[0].id
+    idx = next((i for i, post in enumerate(ordered) if post.id == first_id), -1)
+    if idx <= 0:
+        return None, None
+
+    prev_post = ordered[idx - 1]
+    if not is_synced(engine, source.id, prev_post.id, dest.id):
+        return None, None
+
+    dest_post_id = get_dest_post_id(engine, source.id, prev_post.id, dest.id)
+    if not dest_post_id:
+        return None, None
+
+    if dest.network == NETWORK_BLUESKY:
+        bluesky_reply = await bluesky_api.resolve_reply_target(
+            engine, dest.id, dest_post_id
+        )
+        return None, bluesky_reply
+
+    return dest_post_id, None
+
+
 async def _publish_batch(
     engine: Engine,
     source: Account,
     dest: Account,
     batch: list[Post],
+    thread: list[Post],
     post_delay_seconds: float,
-) -> list[str]:
-    """Publish one batch to a destination account. Returns all created post IDs."""
+) -> tuple[list[str], list[OutboundPost]]:
+    """Publish one batch to a destination account. Returns created post IDs."""
     publish = PUBLISH_HANDLERS[dest.network]
     limits = get_network_limits(dest.network)
     await unwrap_posts_text(batch)
 
     outbounds = build_outbound_posts(batch, limits)
+    if len(outbounds) > 1:
+        logger.info(
+            "[%s -> %s] Publishing %d message(s) in order",
+            account_display_name(source, engine),
+            account_display_name(dest, engine),
+            len(outbounds),
+        )
+
     all_bytes = await _download_media_flat(engine, source, batch)
     media_slices = _slice_media_bytes(outbounds, all_bytes)
 
+    reply_to_id, bluesky_reply_to = await _chain_anchor(
+        engine, source, dest, thread, batch
+    )
+
     dest_ids: list[str] = []
-    reply_to_id: str | None = None
-    bluesky_reply_to: tuple[str, str] | None = None
     for i, (outbound, bytes_chunk) in enumerate(zip(outbounds, media_slices)):
         if dest.network == NETWORK_THREADS:
             dest_id = await threads_api.publish_outbound(
@@ -192,7 +249,7 @@ async def _publish_batch(
         dest_ids.append(dest_id)
         if post_delay_seconds > 0 and i < len(outbounds) - 1:
             await asyncio.sleep(post_delay_seconds)
-    return dest_ids
+    return dest_ids, outbounds
 
 
 def _record_success(
@@ -200,21 +257,23 @@ def _record_success(
     source: Account,
     dest: Account,
     batch: list[Post],
+    outbounds: list[OutboundPost],
     dest_ids: list[str],
 ) -> int:
     """Record sync mappings and mirrored posts. Returns count of new mappings."""
     if not dest_ids:
         return 0
 
-    primary_dest_id = dest_ids[0]
+    per_post_dest = _dest_id_per_source_post(outbounds, dest_ids)
     recorded = 0
     for post in batch:
+        dest_post_id = per_post_dest.get(post.id, dest_ids[-1])
         if mark_synced(
             engine,
             source_account_id=source.id,
             source_post_id=post.id,
             dest_account_id=dest.id,
-            dest_post_id=primary_dest_id,
+            dest_post_id=dest_post_id,
         ):
             recorded += 1
 
@@ -312,8 +371,8 @@ async def sync_account(
 
             post_ids = ", ".join(p.id for p in batch)
             try:
-                dest_ids = await _publish_batch(
-                    engine, source, dest, batch, post_delay_seconds
+                dest_ids, outbounds = await _publish_batch(
+                    engine, source, dest, batch, thread, post_delay_seconds
                 )
             except Exception:
                 logger.exception(
@@ -326,7 +385,9 @@ async def sync_account(
                     await asyncio.sleep(post_delay_seconds)
                 continue
 
-            recorded = _record_success(engine, source, dest, batch, dest_ids)
+            recorded = _record_success(
+                engine, source, dest, batch, outbounds, dest_ids
+            )
             synced += recorded
             logger.info(
                 "[%s -> %s] Synced post(s) %s -> %s",
