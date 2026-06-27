@@ -36,6 +36,7 @@ from db.sync_state import (
     record_mirrored_post,
     set_last_synced_at,
 )
+from apis.types import sort_chronologically
 from sync.thread_processor import (
     build_outbound_posts,
     collect_ready_batch,
@@ -87,7 +88,7 @@ def _group_by_conversation(posts: list[Post]) -> list[list[Post]]:
     groups: dict[str, list[Post]] = defaultdict(list)
     for post in posts:
         groups[post.conversation_id].append(post)
-    return [sorted(group, key=lambda p: p.created_at) for group in groups.values()]
+    return [sort_chronologically(group) for group in groups.values()]
 
 
 def _filter_original_posts(posts: list[Post], mirrored_ids: set[str]) -> list[Post]:
@@ -168,6 +169,24 @@ async def _publish_batch(
                 bytes_chunk,
                 reply_to=bluesky_reply_to,
             )
+        elif dest.network == NETWORK_TWITTER:
+            dest_id = await twitter_api.publish_outbound(
+                engine,
+                dest.id,
+                outbound,
+                bytes_chunk,
+                reply_to_id=reply_to_id,
+            )
+            reply_to_id = dest_id
+        elif dest.network == NETWORK_MASTODON:
+            dest_id = await mastodon_api.publish_outbound(
+                engine,
+                dest.id,
+                outbound,
+                bytes_chunk,
+                in_reply_to_id=reply_to_id,
+            )
+            reply_to_id = dest_id
         else:
             dest_id = await publish(engine, dest.id, outbound, bytes_chunk)
         dest_ids.append(dest_id)

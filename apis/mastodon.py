@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post
+from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
 from config import NETWORK_MASTODON
 from db.accounts import (
     Account,
@@ -310,7 +310,7 @@ async def fetch_posts(
             if len(statuses) < 40:
                 break
 
-    all_posts.sort(key=lambda p: p.created_at)
+    all_posts = sort_chronologically(all_posts)
     return _normalize_thread_roots(all_posts)
 
 
@@ -328,6 +328,8 @@ async def publish_outbound(
     account_id: int,
     outbound: OutboundPost,
     media_bytes: list[bytes] | None = None,
+    *,
+    in_reply_to_id: str | None = None,
 ) -> str:
     instance_url, access_token = await _get_credentials(engine, account_id)
     text = outbound.text or ""
@@ -352,6 +354,8 @@ async def publish_outbound(
         payload: dict[str, str | list[str]] = {"status": text or ""}
         if media_ids:
             payload["media_ids"] = media_ids
+        if in_reply_to_id:
+            payload["in_reply_to_id"] = in_reply_to_id
 
         response = await client.post(
             f"{instance_url}/api/v1/statuses",

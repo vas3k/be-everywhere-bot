@@ -9,7 +9,7 @@ from xml.etree import ElementTree as ET
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post
+from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
 from config import NETWORK_RSS
 from db.accounts import (
     Account,
@@ -225,7 +225,7 @@ async def fetch_posts(
     if since_utc:
         posts = [p for p in posts if p.created_at >= since_utc]
 
-    posts.sort(key=lambda p: p.created_at)
+    posts = sort_chronologically(posts)
     logger.info(
         "RSS feed %s: %d item(s)%s",
         feed_url,

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post
+from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
 from config import NETWORK_TELEGRAM, TELEGRAM_APP
 from db.accounts import (
     Account,
@@ -212,7 +212,7 @@ async def fetch_posts(
                 posts.append(post)
 
     set_credential(engine, account_id, "update_offset", str(offset))
-    posts.sort(key=lambda p: p.created_at)
+    posts = sort_chronologically(posts)
     return posts
 
 

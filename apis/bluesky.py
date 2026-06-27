@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post
+from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
 from config import BLUESKY_APP, NETWORK_BLUESKY
 from db.accounts import (
     Account,
@@ -469,7 +469,7 @@ async def fetch_posts(
             ", ".join(f"{k}={v}" for k, v in sorted(skipped.items())),
         )
 
-    posts.sort(key=lambda p: p.created_at)
+    posts = sort_chronologically(posts)
     return filter_originals_and_threads(posts)
 
 

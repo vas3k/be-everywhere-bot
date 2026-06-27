@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -31,3 +31,17 @@ class OutboundPost:
     text: str
     media: list[MediaItem] = field(default_factory=list)
     source_post_ids: list[str] = field(default_factory=list)
+
+
+def _chronological_key(post: Post) -> tuple[datetime, int | str]:
+    """Oldest first; tie-break with post id (numeric or lexicographic, e.g. Bluesky TID)."""
+    created = post.created_at.astimezone(timezone.utc)
+    try:
+        tiebreaker: int | str = int(post.id)
+    except ValueError:
+        tiebreaker = post.id
+    return (created, tiebreaker)
+
+
+def sort_chronologically(posts: list[Post]) -> list[Post]:
+    return sorted(posts, key=_chronological_key)

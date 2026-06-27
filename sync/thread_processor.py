@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
-from apis.types import MediaItem, OutboundPost, Post
+from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
 from config import NETWORK_LIMITS, NetworkLimits, TELEGRAM_LIMITS
 
 
@@ -21,7 +21,7 @@ def collect_ready_batch(
 ) -> list[Post]:
     """Next unsynced source posts in thread order; stops at first not old enough."""
     batch: list[Post] = []
-    for post in thread:
+    for post in sort_chronologically(thread):
         if is_synced(post.id):
             continue
         if enforce_min_age and not is_old_enough(post, min_age_minutes):
@@ -30,15 +30,33 @@ def collect_ready_batch(
     return batch
 
 
+LINE_SEPARATORS = ("\n\n", "\n")
+SENTENCE_SEPARATORS = (". ", "! ", "? ")
+
+
+def _split_at_separator(window: str, separators: tuple[str, ...]) -> int:
+    for sep in separators:
+        idx = window.rfind(sep)
+        if idx > 0:
+            return idx + len(sep)
+    return 0
+
+
 def split_text(text: str, max_len: int) -> list[str]:
+    """Split text into chunks <= max_len.
+
+    Break priority: paragraph/line (\\n\\n, \\n), then sentence (. ), then word (space).
+    Never splits mid-word unless a single word exceeds max_len.
+    """
     if not text:
         return []
+    if max_len <= 0:
+        raise ValueError("max_len must be positive")
     if len(text) <= max_len:
         return [text]
 
     chunks: list[str] = []
     remaining = text.strip()
-    separators = ["\n\n", "\n", ". ", "! ", "? ", ", ", " "]
 
     while remaining:
         if len(remaining) <= max_len:
@@ -46,19 +64,22 @@ def split_text(text: str, max_len: int) -> list[str]:
             break
 
         window = remaining[:max_len]
-        split_at = 0
-        for sep in separators:
-            idx = window.rfind(sep)
-            if idx > 0:
-                split_at = idx + len(sep)
-                break
+        split_at = _split_at_separator(window, LINE_SEPARATORS)
         if split_at <= 0:
-            split_at = max_len
+            split_at = _split_at_separator(window, SENTENCE_SEPARATORS)
+        if split_at <= 0:
+            idx = window.rfind(" ")
+            if idx > 0:
+                split_at = idx + 1
+            else:
+                split_at = max_len
 
-        chunks.append(remaining[:split_at].rstrip())
+        chunk = remaining[:split_at].rstrip()
+        if chunk:
+            chunks.append(chunk)
         remaining = remaining[split_at:].lstrip()
 
-    return [c for c in chunks if c]
+    return chunks
 
 
 def _chunk(items: list[MediaItem], size: int) -> list[list[MediaItem]]:
@@ -73,6 +94,7 @@ def build_outbound_posts(
     if not posts:
         return []
 
+    posts = sort_chronologically(posts)
     limits = limits or TELEGRAM_LIMITS
     source_ids = [p.id for p in posts]
     combined = "\n\n".join(p.text for p in posts if p.text).strip()

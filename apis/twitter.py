@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post
+from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
 from config import NETWORK_TWITTER, TWITTER_APP
 from db.accounts import (
     Account,
@@ -389,7 +389,7 @@ async def fetch_posts(
         if not pagination_token:
             break
 
-    all_posts.sort(key=lambda p: p.created_at)
+    all_posts = sort_chronologically(all_posts)
     return filter_originals_and_threads(all_posts)
 
 
@@ -414,6 +414,8 @@ async def publish_outbound(
     account_id: int,
     outbound: OutboundPost,
     media_bytes: list[bytes] | None = None,
+    *,
+    reply_to_id: str | None = None,
 ) -> str:
     creds = _require_creds(engine, account_id)
     bearer_token = creds["bearer_token"]
@@ -429,6 +431,8 @@ async def publish_outbound(
         payload: dict[str, Any] = {"text": text}
         if media_ids:
             payload["media"] = {"media_ids": media_ids}
+        if reply_to_id:
+            payload["reply"] = {"in_reply_to_tweet_id": reply_to_id}
 
         data = await _api_post(bearer_token, "/tweets", payload)
         tweet_id = data.get("data", {}).get("id")
