@@ -1,6 +1,10 @@
 from datetime import datetime, timezone
 
-from sync.posts import sort_chronologically
+from utils.posts import sort_chronologically
+
+
+def test_sort_chronologically_empty():
+    assert sort_chronologically([]) == []
 
 
 def test_sort_chronologically_orders_by_time(post_factory):

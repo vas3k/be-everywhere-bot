@@ -14,7 +14,7 @@ import apis.telegram as telegram
 import apis.threads as threads
 import apis.twitter as twitter
 from apis.types import OutboundPost, Post
-from apis.urls import unwrap_posts_text
+from utils.urls import unwrap_posts_text
 from config import (
     BACKFILL_POST_DELAY_SECONDS,
     NETWORK_BLUESKY,
@@ -41,9 +41,9 @@ from db.sync_state import (
     record_mirrored_post,
     set_last_synced_at,
 )
-from sync.filters import filter_own_threads
-from sync.posts import sort_chronologically
-from sync.thread_processor import (
+from utils.filters import filter_own_threads
+from utils.posts import sort_chronologically
+from utils.thread_processor import (
     build_outbound_posts,
     collect_ready_batch,
     get_network_limits,

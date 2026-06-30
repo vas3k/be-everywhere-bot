@@ -1,11 +1,14 @@
 import httpx
 import pytest
+from datetime import datetime, timezone
 
-from apis.urls import (
+from apis.types import Post
+from utils.urls import (
     _find_urls,
     is_shortener,
     public_https_url,
     should_unwrap,
+    unwrap_posts_text,
     unwrap_url,
     unwrap_urls_in_text,
 )
@@ -87,3 +90,27 @@ async def test_unwrap_urls_in_text_replaces_shorteners():
         )
     assert "https://t.co/abc" not in result
     assert "example.com/article" in result
+
+
+@pytest.mark.asyncio
+async def test_unwrap_posts_text_mutates_posts_in_place(monkeypatch):
+    post = Post(
+        id="1",
+        text="Read https://t.co/abc now",
+        created_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
+        conversation_id="1",
+        author_id="author",
+    )
+
+    async def fake_unwrap(text: str, *, client, cache):
+        return text.replace("https://t.co/abc", "https://example.com/article")
+
+    monkeypatch.setattr("utils.urls.unwrap_urls_in_text", fake_unwrap)
+    await unwrap_posts_text([post])
+    assert "https://t.co/abc" not in post.text
+    assert "example.com/article" in post.text
+
+
+@pytest.mark.asyncio
+async def test_unwrap_posts_text_noop_for_empty_list():
+    await unwrap_posts_text([])

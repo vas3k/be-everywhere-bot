@@ -5,9 +5,9 @@ from typing import Any
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.http_utils import format_api_error, parse_error_detail
+from utils.http_utils import format_api_error, parse_error_detail
 from apis.types import MediaItem, OutboundPost, Post, PublishResult
-from sync.posts import sort_chronologically
+from utils.posts import sort_chronologically
 from config import INSTAGRAM_APP, NETWORK_INSTAGRAM, POST_MIN_AGE_MINUTES, NetworkLimits
 from db.accounts import (
     Account,
@@ -164,7 +164,7 @@ def _chunk_media(items: list[MediaItem], size: int) -> list[list[MediaItem]]:
 
 def build_outbounds(batch: list[Post], limits: NetworkLimits) -> list[OutboundPost]:
     """Shape Instagram source posts into destination-sized outbound messages."""
-    from sync.thread_processor import build_outbound_posts
+    from utils.thread_processor import build_outbound_posts
 
     if is_story_batch(batch):
         outbounds = build_story_outbounds(batch, limits)

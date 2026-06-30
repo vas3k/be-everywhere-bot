@@ -4,7 +4,7 @@ import pytest
 
 from apis.types import MediaItem, OutboundPost
 from config import NETWORK_LIMITS, NETWORK_MASTODON, NETWORK_TELEGRAM, TELEGRAM_LIMITS
-from sync.thread_processor import (
+from utils.thread_processor import (
     build_outbound_posts,
     collect_ready_batch,
     get_network_limits,

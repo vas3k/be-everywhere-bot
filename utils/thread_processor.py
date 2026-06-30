@@ -4,8 +4,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from apis.types import MediaItem, OutboundPost, Post
-from sync.posts import sort_chronologically
 from config import NETWORK_LIMITS, NetworkLimits, TELEGRAM_LIMITS
+from utils.posts import sort_chronologically
 
 
 def is_old_enough(post: Post, min_age_minutes: int) -> bool:

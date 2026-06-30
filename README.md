@@ -125,7 +125,7 @@ Verbose output:
 uv run pytest -v
 ```
 
-Coverage includes every network module (`apis/twitter`, `telegram`, `mastodon`, `threads`, `bluesky`, `instagram`, `rss`), link unwrapping (`apis/urls`), thread processing, sync engine helpers, and database sync state.
+Coverage includes every network module (`apis/twitter`, `telegram`, `mastodon`, `threads`, `bluesky`, `instagram`, `rss`), shared helpers (`utils/`), sync engine, and database sync state.
 
 CI runs the same suite on every push and pull request via GitHub Actions (`.github/workflows/tests.yml`).
 
@@ -207,13 +207,13 @@ be-everywhere-bot/
 ├── main.py                 # CLI: watch / --since / --auth / --list-accounts
 ├── config.py               # Timing, network limits, paths
 ├── apis/                   # One module per network (fetch + publish + auth)
+├── utils/                  # Shared helpers (filters, URLs, outbound shaping, HTTP)
 ├── db/
 │   ├── accounts.py         # Multi-account credentials
 │   ├── sync_state.py       # Mappings, mirrored posts, sync watermarks
 │   └── migrations/         # Schema migrations (auto-applied)
 └── sync/
-    ├── engine.py           # Mesh sync orchestration
-    └── thread_processor.py # Thread merging, text splitting
+    └── engine.py           # Mesh sync orchestration
 tests/                      # pytest suite
 ```
 

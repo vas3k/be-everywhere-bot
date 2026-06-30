@@ -64,7 +64,6 @@ async def unwrap_url(
     try:
         response = await client.get(url)
         final = str(response.url).rstrip("/")
-        # Drop twitter/card query junk but keep the link
         cache[url] = final
         logger.debug("Unwrapped %s -> %s", url, final)
         return final

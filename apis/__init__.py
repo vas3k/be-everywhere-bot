@@ -8,6 +8,7 @@ Each module in apis/ exposes:
 
 Source-only networks raise NotImplementedError from publish_outbound.
 Reply-to-other-people filtering runs in sync/engine after fetch, not in APIs.
+Shared helpers live in utils/.
 """
 
 from datetime import datetime

@@ -7,11 +7,11 @@ from typing import Any
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.http_utils import format_api_error, parse_error_detail
-from apis.text_utils import strip_trailing_patterns
+from utils.http_utils import format_api_error, parse_error_detail
+from utils.text_utils import strip_trailing_patterns
 from apis.types import MediaItem, OutboundPost, Post, PublishResult
-from apis.urls import public_https_url
-from sync.posts import sort_chronologically
+from utils.urls import public_https_url
+from utils.posts import sort_chronologically
 from config import NETWORK_THREADS, THREADS_APP
 from db.accounts import (
     Account,

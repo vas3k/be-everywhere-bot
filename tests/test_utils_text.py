@@ -1,6 +1,10 @@
 import re
 
-from apis.text_utils import strip_trailing_patterns
+from utils.text_utils import strip_trailing_patterns
+
+
+def test_strip_trailing_patterns_empty_patterns():
+    assert strip_trailing_patterns("hello", []) == "hello"
 
 
 def test_strip_trailing_patterns_strips_sequential_suffixes():

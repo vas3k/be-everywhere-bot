@@ -7,10 +7,10 @@ from typing import Any
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.http_utils import format_api_error, parse_error_detail, twitter_api_error_extra
-from apis.text_utils import strip_trailing_patterns
+from utils.http_utils import format_api_error, parse_error_detail, twitter_api_error_extra
+from utils.text_utils import strip_trailing_patterns
 from apis.types import MediaItem, OutboundPost, Post, PublishResult
-from sync.posts import sort_chronologically
+from utils.posts import sort_chronologically
 from config import NETWORK_TWITTER, TWITTER_APP
 from db.accounts import (
     Account,

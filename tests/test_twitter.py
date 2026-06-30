@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 
-from apis.http_utils import format_api_error, twitter_api_error_extra
 from apis.twitter import (
     _best_video_url,
     _extract_media,
@@ -90,14 +89,3 @@ def test_twitter_media_type_mapping():
         "video/mp4",
         "tweet_gif",
     )
-
-
-def test_format_api_error_credits_depleted():
-    msg = format_api_error(
-        "X",
-        402,
-        {"title": "CreditsDepleted", "type": "about:credits"},
-        extra=twitter_api_error_extra,
-    )
-    assert "credits depleted" in msg.lower()
-    assert "developer.x.com" in msg

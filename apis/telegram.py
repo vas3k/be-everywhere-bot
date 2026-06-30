@@ -8,7 +8,7 @@ import httpx
 from sqlalchemy.engine import Engine
 
 from apis.types import MediaItem, OutboundPost, Post, PublishResult
-from sync.posts import sort_chronologically
+from utils.posts import sort_chronologically
 from config import NETWORK_TELEGRAM, TELEGRAM_APP
 from db.accounts import (
     Account,

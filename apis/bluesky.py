@@ -7,9 +7,9 @@ from typing import Any
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.http_utils import format_api_error, parse_error_detail
+from utils.http_utils import format_api_error, parse_error_detail
 from apis.types import MediaItem, OutboundPost, Post, PublishResult
-from sync.posts import sort_chronologically
+from utils.posts import sort_chronologically
 from config import BLUESKY_APP, NETWORK_BLUESKY
 from db.accounts import (
     Account,

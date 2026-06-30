@@ -1,7 +1,11 @@
 from datetime import datetime, timezone
 
-from sync.filters import filter_own_threads
+from utils.filters import filter_own_threads
 from apis.types import Post
+
+
+def test_filter_own_threads_empty():
+    assert filter_own_threads([]) == []
 
 
 def test_filter_own_threads_keeps_own_replies():
