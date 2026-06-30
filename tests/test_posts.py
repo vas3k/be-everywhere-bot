@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from apis.types import Post, sort_chronologically
+from sync.posts import sort_chronologically
 
 
 def test_sort_chronologically_orders_by_time(post_factory):

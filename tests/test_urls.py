@@ -1,7 +1,14 @@
 import httpx
 import pytest
 
-from apis.urls import _find_urls, is_shortener, should_unwrap, unwrap_url, unwrap_urls_in_text
+from apis.urls import (
+    _find_urls,
+    is_shortener,
+    public_https_url,
+    should_unwrap,
+    unwrap_url,
+    unwrap_urls_in_text,
+)
 
 
 class _FakeResponse:
@@ -13,6 +20,12 @@ def test_is_shortener():
     assert is_shortener("https://t.co/abc") is True
     assert is_shortener("https://bit.ly/xyz") is True
     assert is_shortener("https://example.com/page") is False
+
+
+def test_public_https_url():
+    assert public_https_url("https://cdn.example/a.jpg") is True
+    assert public_https_url("tgfile:abc") is False
+    assert public_https_url("") is False
 
 
 def test_should_unwrap_matches_shortener():

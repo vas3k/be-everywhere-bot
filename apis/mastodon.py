@@ -7,7 +7,8 @@ from urllib.parse import urlparse
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
+from apis.types import MediaItem, OutboundPost, Post, PublishResult
+from sync.posts import sort_chronologically
 from config import NETWORK_MASTODON
 from db.accounts import (
     Account,
@@ -81,10 +82,6 @@ def _extract_media(status: dict[str, Any]) -> list[MediaItem]:
 
 def _status_to_post(status: dict[str, Any], author_id: str) -> Post | None:
     if status.get("reblog"):
-        return None
-    if status.get("in_reply_to_account_id") and str(
-        status.get("in_reply_to_account_id")
-    ) != str(author_id):
         return None
 
     text = status.get("content") or ""
@@ -412,8 +409,8 @@ async def publish_outbound(
     outbound: OutboundPost,
     media_bytes: list[bytes] | None = None,
     *,
-    in_reply_to_id: str | None = None,
-) -> str:
+    reply_to: str | None = None,
+) -> PublishResult:
     instance_url, access_token = await _get_credentials(engine, account_id)
     text = outbound.text or ""
     media = outbound.media
@@ -430,53 +427,23 @@ async def publish_outbound(
     videos: list[tuple[MediaItem, bytes]] = []
     if media and bytes_list:
         photos, videos = _partition_media_for_publish(media, bytes_list, log_id)
+        if photos and videos:
+            logger.warning(
+                "[%s] Mastodon: mixed photo+video in one outbound — "
+                "posting images only (split outbounds upstream)",
+                log_id,
+            )
+            videos = []
+
+    attachments = photos or videos
 
     async with httpx.AsyncClient(timeout=120.0) as client:
-        if photos and videos:
-            logger.info(
-                "[%s] Mastodon: posting %d image(s) then %d video(s) as reply",
-                log_id,
-                len(photos),
-                len(videos),
-            )
-            status_id = await _post_status(
-                client,
-                instance_url,
-                access_token,
-                text,
-                photos,
-                in_reply_to_id=in_reply_to_id,
-            )
-            await _post_status(
-                client,
-                instance_url,
-                access_token,
-                "",
-                videos,
-                in_reply_to_id=status_id,
-            )
-            return status_id
-
-        attachments = photos or videos
-        return await _post_status(
+        post_id = await _post_status(
             client,
             instance_url,
             access_token,
             text,
             attachments,
-            in_reply_to_id=in_reply_to_id,
+            in_reply_to_id=reply_to,
         )
-
-
-async def publish_post(
-    engine: Engine,
-    account_id: int,
-    post: Post,
-    media_bytes: list[bytes] | None = None,
-) -> str:
-    outbound = OutboundPost(
-        text=post.text,
-        media=post.media,
-        source_post_ids=[post.id],
-    )
-    return await publish_outbound(engine, account_id, outbound, media_bytes)
+        return PublishResult(post_id=post_id, reply_ref=post_id)

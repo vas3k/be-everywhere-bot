@@ -7,7 +7,10 @@ from typing import Any
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
+from apis.http_utils import format_api_error, parse_error_detail, twitter_api_error_extra
+from apis.text_utils import strip_trailing_patterns
+from apis.types import MediaItem, OutboundPost, Post, PublishResult
+from sync.posts import sort_chronologically
 from config import NETWORK_TWITTER, TWITTER_APP
 from db.accounts import (
     Account,
@@ -97,11 +100,10 @@ def _extract_media(tweet: dict[str, Any], includes: dict[str, Any]) -> list[Medi
 
 
 def _strip_trailing_links(text: str, *, has_media: bool) -> str:
-    text = text.rstrip()
-    text = _TRAILING_STATUS_URL.sub("", text).rstrip()
+    patterns = [_TRAILING_STATUS_URL]
     if has_media:
-        text = _TRAILING_TCO.sub("", text).rstrip()
-    return text
+        patterns.append(_TRAILING_TCO)
+    return strip_trailing_patterns(text, patterns)
 
 
 def _skip_reason(tweet: dict[str, Any]) -> str | None:
@@ -143,37 +145,6 @@ def _tweet_to_post(tweet: dict[str, Any], includes: dict[str, Any], author_id: s
     )
 
 
-def filter_originals_and_threads(posts: list[Post]) -> list[Post]:
-    if not posts:
-        return []
-
-    author_id = posts[0].author_id
-    own_ids = {p.id for p in posts}
-    own_thread_roots = {p.id for p in posts if p.conversation_id == p.id}
-
-    kept: list[Post] = []
-    skipped = 0
-
-    for post in posts:
-        if post.in_reply_to_user_id is not None:
-            if str(post.in_reply_to_user_id) != str(author_id):
-                skipped += 1
-                continue
-        elif post.in_reply_to_id is not None:
-            in_own_thread = (
-                post.in_reply_to_id in own_ids
-                or post.conversation_id in own_thread_roots
-            )
-            if not in_own_thread:
-                skipped += 1
-                continue
-        kept.append(post)
-
-    if skipped:
-        logger.info("Filtered out %d reply/replies to other people", skipped)
-    return kept
-
-
 def _require_creds(engine: Engine, account_id: int) -> dict[str, str]:
     creds = get_all_credentials(engine, account_id)
     missing = [k for k in ("bearer_token", "user_id", "username") if not creds.get(k)]
@@ -183,17 +154,6 @@ def _require_creds(engine: Engine, account_id: int) -> dict[str, str]:
             "Run: uv run python main.py --auth=twitter"
         )
     return creds
-
-
-def _format_api_error(status: int, detail: Any) -> str:
-    if status == 402 and isinstance(detail, dict):
-        title = detail.get("title", "")
-        if title == "CreditsDepleted" or "credits" in str(detail.get("type", "")).lower():
-            return (
-                "X API credits depleted (HTTP 402).\n"
-                "Top up at https://developer.x.com/en/portal/dashboard"
-            )
-    return f"X API request failed ({status}): {detail}"
 
 
 async def _api_get(
@@ -206,12 +166,15 @@ async def _api_get(
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.get(url, headers=headers, params=params)
         if not response.is_success:
-            detail: Any = response.text
-            try:
-                detail = response.json()
-            except Exception:
-                pass
-            raise RuntimeError(_format_api_error(response.status_code, detail))
+            detail = parse_error_detail(response)
+            raise RuntimeError(
+                format_api_error(
+                    "X",
+                    response.status_code,
+                    detail,
+                    extra=twitter_api_error_extra,
+                )
+            )
         return response.json()
 
 
@@ -221,12 +184,15 @@ async def _api_post(bearer_token: str, path: str, json_body: dict[str, Any]) -> 
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(url, headers=headers, json=json_body)
         if not response.is_success:
-            detail: Any = response.text
-            try:
-                detail = response.json()
-            except Exception:
-                pass
-            raise RuntimeError(_format_api_error(response.status_code, detail))
+            detail = parse_error_detail(response)
+            raise RuntimeError(
+                format_api_error(
+                    "X",
+                    response.status_code,
+                    detail,
+                    extra=twitter_api_error_extra,
+                )
+            )
         return response.json()
 
 
@@ -389,8 +355,7 @@ async def fetch_posts(
         if not pagination_token:
             break
 
-    all_posts = sort_chronologically(all_posts)
-    return filter_originals_and_threads(all_posts)
+    return sort_chronologically(all_posts)
 
 
 async def download_media(
@@ -415,8 +380,8 @@ async def publish_outbound(
     outbound: OutboundPost,
     media_bytes: list[bytes] | None = None,
     *,
-    reply_to_id: str | None = None,
-) -> str:
+    reply_to: str | None = None,
+) -> PublishResult:
     creds = _require_creds(engine, account_id)
     bearer_token = creds["bearer_token"]
     text = outbound.text or ""
@@ -431,25 +396,12 @@ async def publish_outbound(
         payload: dict[str, Any] = {"text": text}
         if media_ids:
             payload["media"] = {"media_ids": media_ids}
-        if reply_to_id:
-            payload["reply"] = {"in_reply_to_tweet_id": reply_to_id}
+        if reply_to:
+            payload["reply"] = {"in_reply_to_tweet_id": reply_to}
 
         data = await _api_post(bearer_token, "/tweets", payload)
         tweet_id = data.get("data", {}).get("id")
         if not tweet_id:
             raise RuntimeError(f"X post tweet: missing id in response: {data}")
-        return str(tweet_id)
-
-
-async def publish_post(
-    engine: Engine,
-    account_id: int,
-    post: Post,
-    media_bytes: list[bytes] | None = None,
-) -> str:
-    outbound = OutboundPost(
-        text=post.text,
-        media=post.media,
-        source_post_ids=[post.id],
-    )
-    return await publish_outbound(engine, account_id, outbound, media_bytes)
+        post_id = str(tweet_id)
+        return PublishResult(post_id=post_id, reply_ref=post_id)

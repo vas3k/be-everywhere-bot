@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 
 
 @dataclass
@@ -33,15 +33,10 @@ class OutboundPost:
     source_post_ids: list[str] = field(default_factory=list)
 
 
-def _chronological_key(post: Post) -> tuple[datetime, int | str]:
-    """Oldest first; tie-break with post id (numeric or lexicographic, e.g. Bluesky TID)."""
-    created = post.created_at.astimezone(timezone.utc)
-    try:
-        tiebreaker: int | str = int(post.id)
-    except ValueError:
-        tiebreaker = post.id
-    return (created, tiebreaker)
+@dataclass(frozen=True)
+class PublishResult:
+    """Result of publishing one outbound message on a destination network."""
 
+    post_id: str
+    reply_ref: str | None = None
 
-def sort_chronologically(posts: list[Post]) -> list[Post]:
-    return sorted(posts, key=_chronological_key)

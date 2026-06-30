@@ -3,12 +3,15 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
+from apis.http_utils import format_api_error, parse_error_detail
+from apis.text_utils import strip_trailing_patterns
+from apis.types import MediaItem, OutboundPost, Post, PublishResult
+from apis.urls import public_https_url
+from sync.posts import sort_chronologically
 from config import NETWORK_THREADS, THREADS_APP
 from db.accounts import (
     Account,
@@ -21,6 +24,9 @@ from db.accounts import (
 )
 
 logger = logging.getLogger(__name__)
+
+THREADS_CAROUSEL_CHILD_DELAY_SECONDS = 2
+THREADS_PUBLISH_WAIT_SECONDS = 5
 
 AUTH_HELP = """\
 Configure Threads account for mesh sync.
@@ -53,11 +59,10 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(normalized)
 
 
-def _public_https_url(url: str) -> bool:
-    if not url or url.startswith("tgfile:"):
-        return False
-    parsed = urlparse(url)
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+def _strip_trailing_links(text: str, *, has_media: bool) -> str:
+    if not has_media:
+        return text.rstrip()
+    return strip_trailing_patterns(text, [_TRAILING_THREADS_URL])
 
 
 def _threads_media_type(media_type: str) -> str:
@@ -90,13 +95,6 @@ def _extract_media(item: dict[str, Any]) -> list[MediaItem]:
         ]
 
     return []
-
-
-def _strip_trailing_links(text: str, *, has_media: bool) -> str:
-    text = text.rstrip()
-    if has_media:
-        text = _TRAILING_THREADS_URL.sub("", text).rstrip()
-    return text
 
 
 def _skip_reason(item: dict[str, Any]) -> str | None:
@@ -141,32 +139,6 @@ def _item_to_post(item: dict[str, Any], author_id: str) -> Post:
     )
 
 
-def filter_originals_and_threads(posts: list[Post]) -> list[Post]:
-    if not posts:
-        return []
-
-    author_id = posts[0].author_id
-    own_ids = {p.id for p in posts}
-    own_thread_roots = {p.id for p in posts if p.conversation_id == p.id}
-
-    kept: list[Post] = []
-    skipped = 0
-
-    for post in posts:
-        if post.in_reply_to_id is not None:
-            in_own_thread = (
-                post.in_reply_to_id in own_ids
-                or post.conversation_id in own_thread_roots
-            )
-            if not in_own_thread:
-                skipped += 1
-                continue
-        kept.append(post)
-
-    if skipped:
-        logger.info("Filtered out %d Threads reply/replies to other people", skipped)
-    return kept
-
 
 def _require_creds(engine: Engine, account_id: int) -> dict[str, str]:
     creds = get_all_credentials(engine, account_id)
@@ -177,14 +149,6 @@ def _require_creds(engine: Engine, account_id: int) -> dict[str, str]:
             "Run: uv run python main.py --auth=threads"
         )
     return creds
-
-
-def _format_api_error(status: int, detail: Any) -> str:
-    if isinstance(detail, dict):
-        err = detail.get("error", detail)
-        if isinstance(err, dict):
-            return f"Threads API request failed ({status}): {err.get('message', err)}"
-    return f"Threads API request failed ({status}): {detail}"
 
 
 async def _api_get(
@@ -198,12 +162,10 @@ async def _api_get(
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.get(url, params=query)
         if not response.is_success:
-            detail: Any = response.text
-            try:
-                detail = response.json()
-            except Exception:
-                pass
-            raise RuntimeError(_format_api_error(response.status_code, detail))
+            detail = parse_error_detail(response)
+            raise RuntimeError(
+                format_api_error("Threads", response.status_code, detail)
+            )
         return response.json()
 
 
@@ -217,12 +179,10 @@ async def _api_post_form(
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(url, data=payload)
         if not response.is_success:
-            detail: Any = response.text
-            try:
-                detail = response.json()
-            except Exception:
-                pass
-            raise RuntimeError(_format_api_error(response.status_code, detail))
+            detail = parse_error_detail(response)
+            raise RuntimeError(
+                format_api_error("Threads", response.status_code, detail)
+            )
         return response.json()
 
 
@@ -370,8 +330,7 @@ async def fetch_posts(
             ", ".join(f"{k}={v}" for k, v in sorted(skipped.items())),
         )
 
-    posts = sort_chronologically(posts)
-    return filter_originals_and_threads(posts)
+    return sort_chronologically(posts)
 
 
 async def download_media(
@@ -391,7 +350,13 @@ async def _create_container(
     media: list[MediaItem],
     reply_to_id: str | None = None,
 ) -> str:
-    public_media = [m for m in media if _public_https_url(m.url)]
+    public_media = [m for m in media if public_https_url(m.url)]
+    private = [m for m in media if m not in public_media]
+    if private:
+        logger.warning(
+            "Threads publish: skipping %d non-public media URL(s) (e.g. tgfile:)",
+            len(private),
+        )
 
     if not public_media:
         data: dict[str, str] = {"media_type": "TEXT", "text": text or ""}
@@ -428,7 +393,7 @@ async def _create_container(
                 access_token, f"{user_id}/threads", child_data
             )
             child_ids.append(str(child["id"]))
-            await asyncio.sleep(2)
+            await asyncio.sleep(THREADS_CAROUSEL_CHILD_DELAY_SECONDS)
 
         data = {
             "media_type": "CAROUSEL",
@@ -454,7 +419,7 @@ async def _create_container(
 async def _publish_container(
     access_token: str, user_id: str, container_id: str
 ) -> str:
-    await asyncio.sleep(5)
+    await asyncio.sleep(THREADS_PUBLISH_WAIT_SECONDS)
     result = await _api_post_form(
         access_token,
         f"{user_id}/threads_publish",
@@ -472,8 +437,12 @@ async def publish_outbound(
     outbound: OutboundPost,
     media_bytes: list[bytes] | None = None,
     *,
-    reply_to_id: str | None = None,
-) -> str:
+    reply_to: str | None = None,
+) -> PublishResult:
+    if media_bytes:
+        logger.debug(
+            "Threads publish ignores downloaded bytes — API requires public HTTPS URLs"
+        )
     creds = await _ensure_profile(engine, account_id)
     access_token = creds["access_token"]
     user_id = creds["user_id"]
@@ -483,20 +452,7 @@ async def publish_outbound(
         user_id,
         text=outbound.text,
         media=outbound.media,
-        reply_to_id=reply_to_id,
+        reply_to_id=reply_to,
     )
-    return await _publish_container(access_token, user_id, container_id)
-
-
-async def publish_post(
-    engine: Engine,
-    account_id: int,
-    post: Post,
-    media_bytes: list[bytes] | None = None,
-) -> str:
-    outbound = OutboundPost(
-        text=post.text,
-        media=post.media,
-        source_post_ids=[post.id],
-    )
-    return await publish_outbound(engine, account_id, outbound, media_bytes)
+    post_id = await _publish_container(access_token, user_id, container_id)
+    return PublishResult(post_id=post_id, reply_ref=post_id)

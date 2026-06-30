@@ -36,6 +36,14 @@ def is_shortener(url: str) -> bool:
     return host in SHORTENER_HOSTS or host.endswith(".t.co")
 
 
+def public_https_url(url: str) -> bool:
+    """True if URL is a fetchable public http(s) link (not tgfile: etc.)."""
+    if not url or url.startswith("tgfile:"):
+        return False
+    parsed = urlparse(url)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
 def should_unwrap(url: str) -> bool:
     return is_shortener(url)
 

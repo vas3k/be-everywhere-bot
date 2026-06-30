@@ -1,14 +1,13 @@
 from datetime import datetime, timezone
 
+from apis.http_utils import format_api_error, twitter_api_error_extra
 from apis.twitter import (
     _best_video_url,
     _extract_media,
-    _format_api_error,
     _skip_reason,
     _strip_trailing_links,
     _tweet_to_post,
     _twitter_media_type,
-    filter_originals_and_threads,
 )
 from apis.types import MediaItem, Post
 
@@ -81,37 +80,6 @@ def test_tweet_to_post_thread_fields():
     assert post.is_thread_root is False
 
 
-def test_filter_originals_keeps_own_thread_replies():
-    author = "42"
-    root = Post(
-        id="1",
-        text="root",
-        created_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
-        conversation_id="1",
-        author_id=author,
-        is_thread_root=True,
-    )
-    own_reply = Post(
-        id="2",
-        text="mine",
-        created_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
-        conversation_id="1",
-        author_id=author,
-        in_reply_to_id="1",
-        in_reply_to_user_id=author,
-    )
-    foreign_reply = Post(
-        id="3",
-        text="other",
-        created_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
-        conversation_id="9",
-        author_id=author,
-        in_reply_to_id="9",
-        in_reply_to_user_id="999",
-    )
-    kept = filter_originals_and_threads([root, own_reply, foreign_reply])
-    assert [p.id for p in kept] == ["1", "2"]
-
 
 def test_twitter_media_type_mapping():
     assert _twitter_media_type(MediaItem(url="x", media_type="photo")) == (
@@ -125,6 +93,11 @@ def test_twitter_media_type_mapping():
 
 
 def test_format_api_error_credits_depleted():
-    msg = _format_api_error(402, {"title": "CreditsDepleted", "type": "about:credits"})
+    msg = format_api_error(
+        "X",
+        402,
+        {"title": "CreditsDepleted", "type": "about:credits"},
+        extra=twitter_api_error_extra,
+    )
     assert "credits depleted" in msg.lower()
     assert "developer.x.com" in msg

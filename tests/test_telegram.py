@@ -10,6 +10,8 @@ from apis.telegram import (
     _extract_media,
     _file_field,
     _media_filename,
+    _media_group_type,
+    _merge_album_posts,
     _message_to_post,
     _retry_after_seconds,
     _send_method,
@@ -80,6 +82,33 @@ def test_message_to_post_media_group():
     assert post.is_thread_root is False
 
 
+def test_merge_album_posts_combines_slides(post_factory, utc_now):
+    slide1 = post_factory(
+        "10",
+        text="",
+        created_at=utc_now,
+        conversation_id="group-1",
+        media=[MediaItem(url=f"{TG_FILE_PREFIX}a", media_type="photo")],
+    )
+    slide2 = post_factory(
+        "11",
+        text="Album caption",
+        created_at=utc_now,
+        conversation_id="group-1",
+        media=[MediaItem(url=f"{TG_FILE_PREFIX}b", media_type="photo")],
+    )
+    merged = _merge_album_posts([slide2, slide1])
+    assert len(merged) == 1
+    assert merged[0].id == "10"
+    assert merged[0].text == "Album caption"
+    assert len(merged[0].media) == 2
+
+
+def test_media_group_type():
+    assert _media_group_type(MediaItem(url="x", media_type="photo")) == "photo"
+    assert _media_group_type(MediaItem(url="x", media_type="animated_gif")) == "video"
+
+
 def test_message_to_post_ignores_other_channel():
     message = {
         "message_id": 1,
@@ -136,6 +165,6 @@ async def test_publish_outbound_send_media_group(engine):
         ],
         source_post_ids=["src-1"],
     )
-    dest_id = await publish_outbound(engine, account.id, outbound, [b"a", b"b"])
-    assert dest_id == "99"
+    result = await publish_outbound(engine, account.id, outbound, [b"a", b"b"])
+    assert result.post_id == "99"
     assert b"sendMediaGroup" in captured["media"] or b"media" in captured["media"]

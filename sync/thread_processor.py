@@ -3,7 +3,8 @@
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
-from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
+from apis.types import MediaItem, OutboundPost, Post
+from sync.posts import sort_chronologically
 from config import NETWORK_LIMITS, NetworkLimits, TELEGRAM_LIMITS
 
 
@@ -93,11 +94,44 @@ def _outbound_for_single_post(post: Post, limits: NetworkLimits) -> list[Outboun
 
     if not media:
         if not text:
-            return [OutboundPost(text="", source_post_ids=source_ids)]
+            return []
         return [
             OutboundPost(text=chunk, source_post_ids=source_ids)
             for chunk in split_text(text, limits.max_text)
         ]
+
+    if not limits.allows_mixed_media:
+        photos = [item for item in media if item.media_type == "photo"]
+        videos = [
+            item for item in media if item.media_type in ("video", "animated_gif")
+        ]
+        if photos and videos:
+            out: list[OutboundPost] = []
+            photo_post = Post(
+                id=post.id,
+                text=post.text,
+                created_at=post.created_at,
+                conversation_id=post.conversation_id,
+                author_id=post.author_id,
+                media=photos,
+                in_reply_to_id=post.in_reply_to_id,
+                in_reply_to_user_id=post.in_reply_to_user_id,
+                is_thread_root=post.is_thread_root,
+            )
+            video_post = Post(
+                id=post.id,
+                text="",
+                created_at=post.created_at,
+                conversation_id=post.conversation_id,
+                author_id=post.author_id,
+                media=videos,
+                in_reply_to_id=post.in_reply_to_id,
+                in_reply_to_user_id=post.in_reply_to_user_id,
+                is_thread_root=post.is_thread_root,
+            )
+            out.extend(_outbound_for_single_post(photo_post, limits))
+            out.extend(_outbound_for_single_post(video_post, limits))
+            return out
 
     out: list[OutboundPost] = []
     text_remaining = text

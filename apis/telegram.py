@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
+from apis.types import MediaItem, OutboundPost, Post, PublishResult
+from sync.posts import sort_chronologically
 from config import NETWORK_TELEGRAM, TELEGRAM_APP
 from db.accounts import (
     Account,
@@ -112,6 +113,50 @@ def _extract_media(message: dict) -> list[MediaItem]:
     return items
 
 
+def _merge_album_posts(posts: list[Post]) -> list[Post]:
+    """Merge Telegram album slides (shared media_group_id) into one Post."""
+    albums: dict[str, list[Post]] = {}
+    merged: list[Post] = []
+
+    for post in posts:
+        if post.conversation_id != post.id:
+            albums.setdefault(post.conversation_id, []).append(post)
+        else:
+            merged.append(post)
+
+    for slides in albums.values():
+        slides = sort_chronologically(slides)
+        first = slides[0]
+        media: list[MediaItem] = []
+        text = ""
+        for slide in slides:
+            media.extend(slide.media)
+            if not text and slide.text.strip():
+                text = slide.text
+        merged.append(
+            Post(
+                id=first.id,
+                text=text,
+                created_at=first.created_at,
+                conversation_id=first.conversation_id,
+                author_id=first.author_id,
+                media=media,
+                is_thread_root=True,
+            )
+        )
+
+    return sort_chronologically(merged)
+
+
+def _apply_reply_to(data: dict[str, str], reply_to: str | None) -> None:
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
+
+
+def _media_group_type(item: MediaItem) -> str:
+    return "photo" if item.media_type == "photo" else "video"
+
+
 def _message_to_post(message: dict, channel_id: str) -> Post | None:
     chat = message.get("chat") or {}
     if not _chat_matches(channel_id, chat):
@@ -212,8 +257,7 @@ async def fetch_posts(
                 posts.append(post)
 
     set_credential(engine, account_id, "update_offset", str(offset))
-    posts = sort_chronologically(posts)
-    return posts
+    return _merge_album_posts(posts)
 
 
 async def download_media(
@@ -270,7 +314,9 @@ async def publish_outbound(
     account_id: int,
     outbound: OutboundPost,
     media_bytes: list[bytes] | None = None,
-) -> str:
+    *,
+    reply_to: str | None = None,
+) -> PublishResult:
     bot_token, channel_id = await _get_bot_credentials(engine, account_id)
     text = outbound.text or None
     media = outbound.media
@@ -285,20 +331,24 @@ async def publish_outbound(
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         if not media:
+            payload: dict[str, str] = {"chat_id": channel_id, "text": text or " "}
+            _apply_reply_to(payload, reply_to)
             response = await _post_with_retry(
                 client,
                 _api_url(bot_token, "sendMessage"),
-                json={"chat_id": channel_id, "text": text or "(empty)"},
+                json=payload,
             )
             if not response.is_success:
                 raise RuntimeError(f"Telegram sendMessage: {_telegram_api_error(response)}")
-            return str(response.json()["result"]["message_id"])
+            post_id = str(response.json()["result"]["message_id"])
+            return PublishResult(post_id=post_id, reply_ref=post_id)
 
         if len(media) == 1:
             item = media[0]
             data: dict[str, str] = {"chat_id": channel_id}
             if text:
                 data["caption"] = text
+            _apply_reply_to(data, reply_to)
             field = _file_field(item)
             method = _send_method(item)
             files = {field: (_media_filename(item, 0), bytes_list[0])}
@@ -310,40 +360,34 @@ async def publish_outbound(
             )
             if not response.is_success:
                 raise RuntimeError(f"Telegram {method}: {_telegram_api_error(response)}")
-            return str(response.json()["result"]["message_id"])
+            post_id = str(response.json()["result"]["message_id"])
+            return PublishResult(post_id=post_id, reply_ref=post_id)
 
         media_group = []
         files = {}
         for i, (item, raw) in enumerate(zip(media, bytes_list)):
             attach_name = f"file{i}"
-            tg_type = "photo" if item.media_type == "photo" else "video"
-            media_group.append({"type": tg_type, "media": f"attach://{attach_name}"})
+            media_group.append(
+                {"type": _media_group_type(item), "media": f"attach://{attach_name}"}
+            )
             files[attach_name] = (_media_filename(item, i), raw)
 
         if text:
             media_group[0]["caption"] = text
 
+        group_data: dict[str, str] = {
+            "chat_id": channel_id,
+            "media": json.dumps(media_group),
+        }
+        _apply_reply_to(group_data, reply_to)
         response = await _post_with_retry(
             client,
             _api_url(bot_token, "sendMediaGroup"),
-            data={"chat_id": channel_id, "media": json.dumps(media_group)},
+            data=group_data,
             files=files,
         )
         if not response.is_success:
             raise RuntimeError(f"Telegram sendMediaGroup: {_telegram_api_error(response)}")
         messages = response.json()["result"]
-        return str(messages[0]["message_id"])
-
-
-async def publish_post(
-    engine: Engine,
-    account_id: int,
-    post: Post,
-    media_bytes: list[bytes] | None = None,
-) -> str:
-    outbound = OutboundPost(
-        text=post.text,
-        media=post.media,
-        source_post_ids=[post.id],
-    )
-    return await publish_outbound(engine, account_id, outbound, media_bytes)
+        post_id = str(messages[0]["message_id"])
+        return PublishResult(post_id=post_id, reply_ref=post_id)

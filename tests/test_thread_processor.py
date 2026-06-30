@@ -99,6 +99,22 @@ def test_build_outbound_posts_empty_input():
     assert build_outbound_posts([]) == []
 
 
+def test_build_outbound_posts_skips_empty_content(post_factory):
+    post = post_factory("1", text="", media=[])
+    assert build_outbound_posts([post], TELEGRAM_LIMITS) == []
+
+
+def test_build_outbound_posts_splits_mixed_media_for_mastodon(post_factory, photo):
+    video = MediaItem(url="https://example.com/v.mp4", media_type="video")
+    post = post_factory("1", text="Caption", media=[photo, video])
+    out = build_outbound_posts([post], NETWORK_LIMITS[NETWORK_MASTODON])
+    assert len(out) == 2
+    assert out[0].media == [photo]
+    assert out[0].text == "Caption"
+    assert out[1].media == [video]
+    assert out[1].text == ""
+
+
 def test_get_network_limits_known_network():
     assert get_network_limits(NETWORK_TELEGRAM).max_media_group == 4
 

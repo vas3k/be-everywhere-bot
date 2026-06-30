@@ -40,12 +40,18 @@ NETWORKS: list[str] = [
 # Read-only sources — mesh sync publishes from these but never to them.
 SOURCE_ONLY_NETWORKS: frozenset[str] = frozenset({NETWORK_RSS, NETWORK_INSTAGRAM})
 
+# Sources where fetch can return replies — sync filters to own threads after fetch.
+REPLY_FILTER_NETWORKS: frozenset[str] = frozenset(
+    {NETWORK_TWITTER, NETWORK_THREADS, NETWORK_BLUESKY, NETWORK_MASTODON}
+)
+
 
 @dataclass(frozen=True)
 class NetworkLimits:
     max_text: int
     max_caption: int
     max_media_group: int
+    allows_mixed_media: bool = True
 
 
 @dataclass(frozen=True)
@@ -81,7 +87,9 @@ BLUESKY_APP = BlueskyAppConfig()
 INSTAGRAM_APP = InstagramAppConfig()
 
 TELEGRAM_LIMITS = NetworkLimits(max_text=4096, max_caption=1024, max_media_group=4)
-MASTODON_LIMITS = NetworkLimits(max_text=500, max_caption=500, max_media_group=4)
+MASTODON_LIMITS = NetworkLimits(
+    max_text=500, max_caption=500, max_media_group=4, allows_mixed_media=False
+)
 
 TWITTER_LIMITS = NetworkLimits(max_text=280, max_caption=280, max_media_group=4)
 

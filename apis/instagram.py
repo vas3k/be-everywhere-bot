@@ -5,7 +5,9 @@ from typing import Any
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
+from apis.http_utils import format_api_error, parse_error_detail
+from apis.types import MediaItem, OutboundPost, Post, PublishResult
+from sync.posts import sort_chronologically
 from config import INSTAGRAM_APP, NETWORK_INSTAGRAM, POST_MIN_AGE_MINUTES, NetworkLimits
 from db.accounts import (
     Account,
@@ -160,6 +162,22 @@ def _chunk_media(items: list[MediaItem], size: int) -> list[list[MediaItem]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+def build_outbounds(batch: list[Post], limits: NetworkLimits) -> list[OutboundPost]:
+    """Shape Instagram source posts into destination-sized outbound messages."""
+    from sync.thread_processor import build_outbound_posts
+
+    if is_story_batch(batch):
+        outbounds = build_story_outbounds(batch, limits)
+        if len(batch) > 1:
+            logger.info(
+                "Instagram: merged %d story slide(s) into %d post(s)",
+                len(batch),
+                len(outbounds),
+            )
+        return outbounds
+    return build_outbound_posts(batch, limits)
+
+
 def build_story_outbounds(
     batch: list[Post], limits: NetworkLimits
 ) -> list[OutboundPost]:
@@ -183,7 +201,7 @@ def build_story_outbounds(
         all_media.extend(post.media)
 
     if not all_media:
-        return [OutboundPost(text="", source_post_ids=source_ids)]
+        return []
 
     caption = next((post.text for post in ordered if post.text.strip()), "")
     outbounds: list[OutboundPost] = []
@@ -209,14 +227,6 @@ def _require_creds(engine: Engine, account_id: int) -> dict[str, str]:
     return creds
 
 
-def _format_api_error(status: int, detail: Any) -> str:
-    if isinstance(detail, dict):
-        err = detail.get("error", detail)
-        if isinstance(err, dict):
-            return f"Instagram API request failed ({status}): {err.get('message', err)}"
-    return f"Instagram API request failed ({status}): {detail}"
-
-
 async def _api_get(
     base_url: str,
     access_token: str,
@@ -229,12 +239,10 @@ async def _api_get(
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.get(url, params=query)
         if not response.is_success:
-            detail: Any = response.text
-            try:
-                detail = response.json()
-            except Exception:
-                pass
-            raise RuntimeError(_format_api_error(response.status_code, detail))
+            detail = parse_error_detail(response)
+            raise RuntimeError(
+                format_api_error("Instagram", response.status_code, detail)
+            )
         return response.json()
 
 
@@ -446,14 +454,7 @@ async def publish_outbound(
     account_id: int,
     outbound: OutboundPost,
     media_bytes: list[bytes] | None = None,
-) -> str:
-    raise NotImplementedError("Instagram is configured as a source-only network")
-
-
-async def publish_post(
-    engine: Engine,
-    account_id: int,
-    post: Post,
-    media_bytes: list[bytes] | None = None,
-) -> str:
+    *,
+    reply_to: str | None = None,
+) -> PublishResult:
     raise NotImplementedError("Instagram is configured as a source-only network")

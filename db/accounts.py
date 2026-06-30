@@ -4,6 +4,15 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
+from config import (
+    NETWORK_BLUESKY,
+    NETWORK_INSTAGRAM,
+    NETWORK_MASTODON,
+    NETWORK_RSS,
+    NETWORK_TELEGRAM,
+    NETWORK_THREADS,
+    NETWORK_TWITTER,
+)
 from db.schema import account_credentials, accounts
 
 
@@ -136,33 +145,33 @@ def delete_account_credentials(engine: Engine, account_id: int) -> None:
 
 def account_display_name(account: Account, engine: Engine) -> str:
     creds = get_all_credentials(engine, account.id)
-    if account.network == "twitter":
+    if account.network == NETWORK_TWITTER:
         username = creds.get("username")
         if username:
             return f"@{username}"
-    if account.network == "telegram":
+    if account.network == NETWORK_TELEGRAM:
         channel = creds.get("channel_id")
         if channel:
             return channel
-    if account.network == "mastodon":
+    if account.network == NETWORK_MASTODON:
         username = creds.get("username")
         instance = creds.get("instance_url", "")
         if username and instance:
             host = instance.removeprefix("https://").removeprefix("http://").rstrip("/")
             return f"@{username}@{host}"
-    if account.network == "threads":
+    if account.network == NETWORK_THREADS:
         username = creds.get("username")
         if username:
             return f"@{username}"
-    if account.network == "bluesky":
+    if account.network == NETWORK_BLUESKY:
         handle = creds.get("handle")
         if handle:
             return f"@{handle}"
-    if account.network == "rss":
+    if account.network == NETWORK_RSS:
         feed_url = creds.get("feed_url")
         if feed_url:
             return feed_url
-    if account.network == "instagram":
+    if account.network == NETWORK_INSTAGRAM:
         username = creds.get("username")
         if username:
             return f"@{username}"

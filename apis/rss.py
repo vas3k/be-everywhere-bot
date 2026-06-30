@@ -9,7 +9,8 @@ from xml.etree import ElementTree as ET
 import httpx
 from sqlalchemy.engine import Engine
 
-from apis.types import MediaItem, OutboundPost, Post, sort_chronologically
+from apis.types import MediaItem, OutboundPost, Post, PublishResult
+from sync.posts import sort_chronologically
 from config import NETWORK_RSS
 from db.accounts import (
     Account,
@@ -249,14 +250,7 @@ async def publish_outbound(
     account_id: int,
     outbound: OutboundPost,
     media_bytes: list[bytes] | None = None,
-) -> str:
-    raise NotImplementedError("RSS is configured as a source-only feed")
-
-
-async def publish_post(
-    engine: Engine,
-    account_id: int,
-    post: Post,
-    media_bytes: list[bytes] | None = None,
-) -> str:
+    *,
+    reply_to: str | None = None,
+) -> PublishResult:
     raise NotImplementedError("RSS is configured as a source-only feed")

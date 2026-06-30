@@ -2,16 +2,17 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from types import ModuleType
 
 from sqlalchemy.engine import Engine
 
-import apis.bluesky as bluesky_api
-import apis.instagram as instagram_api
-import apis.mastodon as mastodon_api
-import apis.rss as rss_api
-import apis.telegram as telegram_api
-import apis.threads as threads_api
-import apis.twitter as twitter_api
+import apis.bluesky as bluesky
+import apis.instagram as instagram
+import apis.mastodon as mastodon
+import apis.rss as rss
+import apis.telegram as telegram
+import apis.threads as threads
+import apis.twitter as twitter
 from apis.types import OutboundPost, Post
 from apis.urls import unwrap_posts_text
 from config import (
@@ -24,6 +25,7 @@ from config import (
     NETWORK_THREADS,
     NETWORK_TWITTER,
     POST_MIN_AGE_MINUTES,
+    REPLY_FILTER_NETWORKS,
     SOURCE_ONLY_NETWORKS,
     WATCH_INITIAL_LOOKBACK_HOURS,
     WATCH_MAX_PAGES,
@@ -39,7 +41,8 @@ from db.sync_state import (
     record_mirrored_post,
     set_last_synced_at,
 )
-from apis.types import sort_chronologically
+from sync.filters import filter_own_threads
+from sync.posts import sort_chronologically
 from sync.thread_processor import (
     build_outbound_posts,
     collect_ready_batch,
@@ -48,31 +51,22 @@ from sync.thread_processor import (
 
 logger = logging.getLogger(__name__)
 
-FETCH_HANDLERS = {
-    NETWORK_TWITTER: twitter_api.fetch_posts,
-    NETWORK_TELEGRAM: telegram_api.fetch_posts,
-    NETWORK_MASTODON: mastodon_api.fetch_posts,
-    NETWORK_THREADS: threads_api.fetch_posts,
-    NETWORK_BLUESKY: bluesky_api.fetch_posts,
-    NETWORK_RSS: rss_api.fetch_posts,
-    NETWORK_INSTAGRAM: instagram_api.fetch_posts,
+_NETWORKS: dict[str, ModuleType] = {
+    NETWORK_TWITTER: twitter,
+    NETWORK_TELEGRAM: telegram,
+    NETWORK_MASTODON: mastodon,
+    NETWORK_THREADS: threads,
+    NETWORK_BLUESKY: bluesky,
+    NETWORK_RSS: rss,
+    NETWORK_INSTAGRAM: instagram,
 }
-PUBLISH_HANDLERS = {
-    NETWORK_TWITTER: twitter_api.publish_outbound,
-    NETWORK_TELEGRAM: telegram_api.publish_outbound,
-    NETWORK_MASTODON: mastodon_api.publish_outbound,
-    NETWORK_THREADS: threads_api.publish_outbound,
-    NETWORK_BLUESKY: bluesky_api.publish_outbound,
-}
-DOWNLOAD_HANDLERS = {
-    NETWORK_TWITTER: twitter_api.download_media,
-    NETWORK_TELEGRAM: telegram_api.download_media,
-    NETWORK_MASTODON: mastodon_api.download_media,
-    NETWORK_THREADS: threads_api.download_media,
-    NETWORK_BLUESKY: bluesky_api.download_media,
-    NETWORK_RSS: rss_api.download_media,
-    NETWORK_INSTAGRAM: instagram_api.download_media,
-}
+
+
+def _api(network: str) -> ModuleType:
+    try:
+        return _NETWORKS[network]
+    except KeyError as exc:
+        raise ValueError(f"Unknown network: {network}") from exc
 
 
 def _fetch_since(
@@ -117,9 +111,9 @@ def _destination_accounts(source: Account, all_accounts: list[Account]) -> list[
 async def _download_media_flat(
     engine: Engine, source: Account, posts: list[Post]
 ) -> list[bytes]:
-    download = DOWNLOAD_HANDLERS[source.network]
+    api = _api(source.network)
     return [
-        await download(item, engine, source.id)
+        await api.download_media(item, engine, source.id)
         for post in posts
         for item in post.media
     ]
@@ -154,32 +148,29 @@ async def _chain_anchor(
     dest: Account,
     thread: list[Post],
     batch: list[Post],
-) -> tuple[str | None, tuple[str, str] | None]:
-    """Reply target when this batch continues a partially synced conversation."""
+) -> str | None:
+    """Reply ref when this batch continues a partially synced conversation."""
     if not batch:
-        return None, None
+        return None
 
     ordered = sort_chronologically(thread)
     first_id = batch[0].id
     idx = next((i for i, post in enumerate(ordered) if post.id == first_id), -1)
     if idx <= 0:
-        return None, None
+        return None
 
     prev_post = ordered[idx - 1]
     if not is_synced(engine, source.id, prev_post.id, dest.id):
-        return None, None
+        return None
 
     dest_post_id = get_dest_post_id(engine, source.id, prev_post.id, dest.id)
     if not dest_post_id:
-        return None, None
+        return None
 
     if dest.network == NETWORK_BLUESKY:
-        bluesky_reply = await bluesky_api.resolve_reply_target(
-            engine, dest.id, dest_post_id
-        )
-        return None, bluesky_reply
+        return await bluesky.resolve_reply_target(engine, dest.id, dest_post_id)
 
-    return dest_post_id, None
+    return dest_post_id
 
 
 async def _publish_batch(
@@ -191,20 +182,12 @@ async def _publish_batch(
     post_delay_seconds: float,
 ) -> tuple[list[str], list[OutboundPost]]:
     """Publish one batch to a destination account. Returns created post IDs."""
-    publish = PUBLISH_HANDLERS[dest.network]
+    api = _api(dest.network)
     limits = get_network_limits(dest.network)
     await unwrap_posts_text(batch)
 
-    if source.network == NETWORK_INSTAGRAM and instagram_api.is_story_batch(batch):
-        outbounds = instagram_api.build_story_outbounds(batch, limits)
-        if len(batch) > 1:
-            logger.info(
-                "[%s -> %s] Merging %d Instagram story slide(s) into %d post(s)",
-                account_display_name(source, engine),
-                account_display_name(dest, engine),
-                len(batch),
-                len(outbounds),
-            )
+    if source.network == NETWORK_INSTAGRAM:
+        outbounds = instagram.build_outbounds(batch, limits)
     else:
         outbounds = build_outbound_posts(batch, limits)
     if len(outbounds) > 1:
@@ -215,53 +198,25 @@ async def _publish_batch(
             len(outbounds),
         )
 
-    all_bytes = await _download_media_flat(engine, source, batch)
-    media_slices = _slice_media_bytes(outbounds, all_bytes)
+    if dest.network == NETWORK_THREADS:
+        media_slices: list[list[bytes]] = [[] for _ in outbounds]
+    else:
+        all_bytes = await _download_media_flat(engine, source, batch)
+        media_slices = _slice_media_bytes(outbounds, all_bytes)
 
-    reply_to_id, bluesky_reply_to = await _chain_anchor(
-        engine, source, dest, thread, batch
-    )
+    reply_to = await _chain_anchor(engine, source, dest, thread, batch)
 
     dest_ids: list[str] = []
     for i, (outbound, bytes_chunk) in enumerate(zip(outbounds, media_slices)):
-        if dest.network == NETWORK_THREADS:
-            dest_id = await threads_api.publish_outbound(
-                engine,
-                dest.id,
-                outbound,
-                bytes_chunk,
-                reply_to_id=reply_to_id,
-            )
-            reply_to_id = dest_id
-        elif dest.network == NETWORK_BLUESKY:
-            dest_id, bluesky_reply_to = await bluesky_api.publish_outbound(
-                engine,
-                dest.id,
-                outbound,
-                bytes_chunk,
-                reply_to=bluesky_reply_to,
-            )
-        elif dest.network == NETWORK_TWITTER:
-            dest_id = await twitter_api.publish_outbound(
-                engine,
-                dest.id,
-                outbound,
-                bytes_chunk,
-                reply_to_id=reply_to_id,
-            )
-            reply_to_id = dest_id
-        elif dest.network == NETWORK_MASTODON:
-            dest_id = await mastodon_api.publish_outbound(
-                engine,
-                dest.id,
-                outbound,
-                bytes_chunk,
-                in_reply_to_id=reply_to_id,
-            )
-            reply_to_id = dest_id
-        else:
-            dest_id = await publish(engine, dest.id, outbound, bytes_chunk)
-        dest_ids.append(dest_id)
+        result = await api.publish_outbound(
+            engine,
+            dest.id,
+            outbound,
+            bytes_chunk,
+            reply_to=reply_to,
+        )
+        dest_ids.append(result.post_id)
+        reply_to = result.reply_ref
         if post_delay_seconds > 0 and i < len(outbounds) - 1:
             await asyncio.sleep(post_delay_seconds)
     return dest_ids, outbounds
@@ -344,7 +299,7 @@ async def sync_account(
         )
 
     try:
-        posts = await FETCH_HANDLERS[source.network](
+        posts = await _api(source.network).fetch_posts(
             engine,
             source.id,
             since=fetch_since,
@@ -359,6 +314,8 @@ async def sync_account(
         return 0
     mirrored_ids = get_mirrored_post_ids(engine, source.id)
     posts = _filter_original_posts(posts, mirrored_ids)
+    if source.network in REPLY_FILTER_NETWORKS:
+        posts = filter_own_threads(posts)
 
     pending = sum(
         1

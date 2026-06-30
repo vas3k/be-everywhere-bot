@@ -8,7 +8,6 @@ from apis.bluesky import (
     _rkey_from_uri,
     _skip_reason,
     _xrpc_url,
-    filter_originals_and_threads,
 )
 from apis.types import Post
 
@@ -49,9 +48,8 @@ def test_extract_media_images_and_video():
     assert vids[0].media_type == "video"
 
 
-def test_skip_reason_repost_quote_foreign_reply():
-    own_did = "did:plc:me"
-    assert _skip_reason({"reason": {"$type": "app.bsky.feed.defs#reasonRepost"}}, own_did) == "repost"
+def test_skip_reason_repost_and_quote():
+    assert _skip_reason({"reason": {"$type": "app.bsky.feed.defs#reasonRepost"}}) == "repost"
     item = {
         "post": {
             "record": {
@@ -60,15 +58,7 @@ def test_skip_reason_repost_quote_foreign_reply():
             }
         }
     }
-    assert _skip_reason(item, own_did) == "quote"
-    foreign = {
-        "post": {
-            "record": {
-                "reply": {"root": {"uri": "at://did:plc:other/app.bsky.feed.post/x"}},
-            }
-        }
-    }
-    assert _skip_reason(foreign, own_did) == "foreign_reply"
+    assert _skip_reason(item) == "quote"
 
 
 def test_feed_item_to_post_reply_chain():
@@ -90,33 +80,3 @@ def test_feed_item_to_post_reply_chain():
     assert post.id == "reply1"
     assert post.conversation_id == "root1"
     assert post.in_reply_to_id == "root1"
-
-
-def test_filter_originals_keeps_own_thread():
-    did = "did:plc:me"
-    root = Post(
-        id="root1",
-        text="root",
-        created_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
-        conversation_id="root1",
-        author_id=did,
-        is_thread_root=True,
-    )
-    own_reply = Post(
-        id="reply1",
-        text="mine",
-        created_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
-        conversation_id="root1",
-        author_id=did,
-        in_reply_to_id="root1",
-    )
-    foreign = Post(
-        id="reply2",
-        text="other",
-        created_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
-        conversation_id="other",
-        author_id=did,
-        in_reply_to_id="someone",
-    )
-    kept = filter_originals_and_threads([root, own_reply, foreign])
-    assert [p.id for p in kept] == ["root1", "reply1"]
