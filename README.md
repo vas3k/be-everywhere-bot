@@ -110,6 +110,25 @@ uv run python main.py --list-accounts      # show configured accounts
 uv run python main.py -v                   # debug logging
 ```
 
+## Testing
+
+Tests use [pytest](https://docs.pytest.org/). Install dev dependencies and run the suite:
+
+```bash
+uv sync --dev
+uv run pytest
+```
+
+Verbose output:
+
+```bash
+uv run pytest -v
+```
+
+Coverage includes every network module (`apis/twitter`, `telegram`, `mastodon`, `threads`, `bluesky`, `instagram`, `rss`), link unwrapping (`apis/urls`), thread processing, sync engine helpers, and database sync state.
+
+CI runs the same suite on every push and pull request via GitHub Actions (`.github/workflows/tests.yml`).
+
 ### Watch mode
 
 Polls on a **cron schedule** (see `WATCH_CRON` in `config.py`). For each account:
@@ -195,6 +214,7 @@ be-everywhere-bot/
 └── sync/
     ├── engine.py           # Mesh sync orchestration
     └── thread_processor.py # Thread merging, text splitting
+tests/                      # pytest suite
 ```
 
 ## Configuration
