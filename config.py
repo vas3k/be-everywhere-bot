@@ -40,6 +40,9 @@ NETWORKS: list[str] = [
 # Read-only sources — mesh sync publishes from these but never to them.
 SOURCE_ONLY_NETWORKS: frozenset[str] = frozenset({NETWORK_RSS, NETWORK_INSTAGRAM})
 
+# Suffix on post text — keep on source network only, do not mesh-sync elsewhere.
+SOURCE_ONLY_MARKER = "/x"
+
 # Sources where fetch can return replies — sync filters to own threads after fetch.
 REPLY_FILTER_NETWORKS: frozenset[str] = frozenset(
     {NETWORK_TWITTER, NETWORK_THREADS, NETWORK_BLUESKY, NETWORK_MASTODON}

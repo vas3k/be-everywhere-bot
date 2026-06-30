@@ -9,6 +9,7 @@ A small Python app that **mesh-syncs** your posts across **X (Twitter)**, **Thre
 - **Thread support** — consecutive posts in the same conversation are merged when the destination allows
 - **Duplicate protection** — `sync_mappings` + `mirrored_posts` prevent re-syncing and circular reposts
 - **Smart filtering** (X) — skips retweets, quote tweets, `@`-replies, and replies to other people
+- **Source-only marker** — append `/x` to a post to keep it on that network only (not mesh-synced)
 - **Link unwrapping** — `t.co` and other shorteners are resolved before posting
 - **Two run modes** — continuous watch (cron schedule) and one-shot backfill (`--since`)
 - **Database migrations** — schema upgrades run automatically on startup

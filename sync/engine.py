@@ -41,7 +41,7 @@ from db.sync_state import (
     record_mirrored_post,
     set_last_synced_at,
 )
-from utils.filters import filter_own_threads
+from utils.filters import exclude_source_only_posts, filter_own_threads
 from utils.posts import sort_chronologically
 from utils.thread_processor import (
     build_outbound_posts,
@@ -316,6 +316,7 @@ async def sync_account(
     posts = _filter_original_posts(posts, mirrored_ids)
     if source.network in REPLY_FILTER_NETWORKS:
         posts = filter_own_threads(posts)
+    posts = exclude_source_only_posts(posts)
 
     pending = sum(
         1
