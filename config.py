@@ -3,7 +3,7 @@ from pathlib import Path
 
 # --- Timing ---
 
-WATCH_INTERVAL_MINUTES = 30
+WATCH_CRON = "0,30 9-23 * * *"  # :00 and :30 each hour, 09:00–23:30 UTC
 POST_MIN_AGE_MINUTES = 30
 BACKFILL_POST_DELAY_SECONDS = 3  # pause between posts during --since backfill
 

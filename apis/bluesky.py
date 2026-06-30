@@ -77,11 +77,83 @@ def _format_api_error(status: int, detail: Any) -> str:
     return f"Bluesky API request failed ({status}): {detail}"
 
 
+def _parse_error_detail(response: httpx.Response) -> Any:
+    detail: Any = response.text
+    try:
+        detail = response.json()
+    except Exception:
+        pass
+    return detail
+
+
+def _is_token_expired(status: int, detail: Any) -> bool:
+    if status not in (400, 401):
+        return False
+    if isinstance(detail, dict):
+        msg = str(detail.get("message") or detail.get("error") or "").lower()
+    else:
+        msg = str(detail).lower()
+    return "expired" in msg or "invalid token" in msg
+
+
+async def _refresh_session(
+    engine: Engine, account_id: int, creds: dict[str, str]
+) -> str:
+    refresh_jwt = creds.get("refresh_jwt")
+    if not refresh_jwt:
+        raise RuntimeError(
+            f"Bluesky account {account_id} refresh token missing. "
+            "Run: uv run python main.py --auth=bluesky"
+        )
+
+    pds_url = creds["pds_url"]
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            _xrpc_url(pds_url, "com.atproto.server.refreshSession"),
+            headers={"Authorization": f"Bearer {refresh_jwt}"},
+        )
+        if not response.is_success:
+            detail = _parse_error_detail(response)
+            raise RuntimeError(_format_api_error(response.status_code, detail))
+        session = response.json()
+
+    new_access = session["accessJwt"]
+    updates = {"access_jwt": new_access}
+    if session.get("refreshJwt"):
+        updates["refresh_jwt"] = session["refreshJwt"]
+    set_credentials(engine, account_id, updates)
+    creds.update(updates)
+    logger.info("Refreshed Bluesky session for account %d", account_id)
+    return new_access
+
+
+async def _maybe_refresh_and_retry(
+    engine: Engine | None,
+    account_id: int | None,
+    creds: dict[str, str] | None,
+    access_jwt: str,
+    status: int,
+    detail: Any,
+    *,
+    retried: bool,
+) -> str | None:
+    if retried or not engine or account_id is None or not creds:
+        return None
+    if not _is_token_expired(status, detail):
+        return None
+    return await _refresh_session(engine, account_id, creds)
+
+
 async def _api_get(
     pds_url: str,
     access_jwt: str,
     method: str,
     params: dict[str, str] | None = None,
+    *,
+    engine: Engine | None = None,
+    account_id: int | None = None,
+    creds: dict[str, str] | None = None,
+    _retried: bool = False,
 ) -> dict[str, Any]:
     headers = {"Authorization": f"Bearer {access_jwt}"}
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -91,11 +163,27 @@ async def _api_get(
             params=params,
         )
         if not response.is_success:
-            detail: Any = response.text
-            try:
-                detail = response.json()
-            except Exception:
-                pass
+            detail = _parse_error_detail(response)
+            new_jwt = await _maybe_refresh_and_retry(
+                engine,
+                account_id,
+                creds,
+                access_jwt,
+                response.status_code,
+                detail,
+                retried=_retried,
+            )
+            if new_jwt:
+                return await _api_get(
+                    pds_url,
+                    new_jwt,
+                    method,
+                    params,
+                    engine=engine,
+                    account_id=account_id,
+                    creds=creds,
+                    _retried=True,
+                )
             raise RuntimeError(_format_api_error(response.status_code, detail))
         return response.json()
 
@@ -105,6 +193,11 @@ async def _api_post_json(
     access_jwt: str,
     method: str,
     body: dict[str, Any],
+    *,
+    engine: Engine | None = None,
+    account_id: int | None = None,
+    creds: dict[str, str] | None = None,
+    _retried: bool = False,
 ) -> dict[str, Any]:
     headers = {"Authorization": f"Bearer {access_jwt}"}
     async with httpx.AsyncClient(timeout=120.0) as client:
@@ -114,11 +207,27 @@ async def _api_post_json(
             json=body,
         )
         if not response.is_success:
-            detail: Any = response.text
-            try:
-                detail = response.json()
-            except Exception:
-                pass
+            detail = _parse_error_detail(response)
+            new_jwt = await _maybe_refresh_and_retry(
+                engine,
+                account_id,
+                creds,
+                access_jwt,
+                response.status_code,
+                detail,
+                retried=_retried,
+            )
+            if new_jwt:
+                return await _api_post_json(
+                    pds_url,
+                    new_jwt,
+                    method,
+                    body,
+                    engine=engine,
+                    account_id=account_id,
+                    creds=creds,
+                    _retried=True,
+                )
             raise RuntimeError(_format_api_error(response.status_code, detail))
         return response.json()
 
@@ -129,6 +238,11 @@ async def _api_post_bytes(
     method: str,
     content: bytes,
     content_type: str,
+    *,
+    engine: Engine | None = None,
+    account_id: int | None = None,
+    creds: dict[str, str] | None = None,
+    _retried: bool = False,
 ) -> dict[str, Any]:
     headers = {
         "Authorization": f"Bearer {access_jwt}",
@@ -141,11 +255,28 @@ async def _api_post_bytes(
             content=content,
         )
         if not response.is_success:
-            detail: Any = response.text
-            try:
-                detail = response.json()
-            except Exception:
-                pass
+            detail = _parse_error_detail(response)
+            new_jwt = await _maybe_refresh_and_retry(
+                engine,
+                account_id,
+                creds,
+                access_jwt,
+                response.status_code,
+                detail,
+                retried=_retried,
+            )
+            if new_jwt:
+                return await _api_post_bytes(
+                    pds_url,
+                    new_jwt,
+                    method,
+                    content,
+                    content_type,
+                    engine=engine,
+                    account_id=account_id,
+                    creds=creds,
+                    _retried=True,
+                )
             raise RuntimeError(_format_api_error(response.status_code, detail))
         return response.json()
 
@@ -276,6 +407,10 @@ async def _upload_blob(
     access_jwt: str,
     raw: bytes,
     item: MediaItem,
+    *,
+    engine: Engine | None = None,
+    account_id: int | None = None,
+    creds: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if item.media_type == "photo" and len(raw) > IMAGE_MAX_BYTES:
         raise RuntimeError(
@@ -287,6 +422,9 @@ async def _upload_blob(
         "com.atproto.repo.uploadBlob",
         raw,
         _media_content_type(item),
+        engine=engine,
+        account_id=account_id,
+        creds=creds,
     )
     blob = result.get("blob")
     if not blob:
@@ -299,6 +437,10 @@ async def _get_reply_refs(
     access_jwt: str,
     parent_uri: str,
     parent_cid: str,
+    *,
+    engine: Engine | None = None,
+    account_id: int | None = None,
+    creds: dict[str, str] | None = None,
 ) -> dict[str, dict[str, str]]:
     uri_parts = parent_uri.replace("at://", "").split("/")
     repo, collection, rkey = uri_parts[0], uri_parts[1], uri_parts[2]
@@ -307,6 +449,9 @@ async def _get_reply_refs(
         access_jwt,
         "com.atproto.repo.getRecord",
         {"repo": repo, "collection": collection, "rkey": rkey},
+        engine=engine,
+        account_id=account_id,
+        creds=creds,
     )
     parent_reply = parent.get("value", {}).get("reply")
     if parent_reply:
@@ -324,16 +469,31 @@ async def _build_embed(
     access_jwt: str,
     media: list[MediaItem],
     media_bytes: list[bytes],
+    *,
+    engine: Engine | None = None,
+    account_id: int | None = None,
+    creds: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     if not media:
         return None
 
     images: list[dict[str, Any]] = []
     video_blob: dict[str, Any] | None = None
+    auth = creds["access_jwt"] if creds else access_jwt
 
     for item, raw in zip(media, media_bytes):
         if item.media_type == "photo" and len(images) < 4:
-            blob = await _upload_blob(pds_url, access_jwt, raw, item)
+            blob = await _upload_blob(
+                pds_url,
+                auth,
+                raw,
+                item,
+                engine=engine,
+                account_id=account_id,
+                creds=creds,
+            )
+            if creds:
+                auth = creds["access_jwt"]
             images.append(
                 {
                     "alt": item.alt_text or "",
@@ -341,7 +501,17 @@ async def _build_embed(
                 }
             )
         elif item.media_type in ("video", "animated_gif") and video_blob is None:
-            video_blob = await _upload_blob(pds_url, access_jwt, raw, item)
+            video_blob = await _upload_blob(
+                pds_url,
+                auth,
+                raw,
+                item,
+                engine=engine,
+                account_id=account_id,
+                creds=creds,
+            )
+            if creds:
+                auth = creds["access_jwt"]
 
     if images:
         return {"$type": "app.bsky.embed.images", "images": images}
@@ -403,7 +573,6 @@ async def fetch_posts(
 ) -> list[Post]:
     creds = _require_creds(engine, account_id)
     pds_url = creds["pds_url"]
-    access_jwt = creds["access_jwt"]
     actor = creds["did"]
     own_did = creds["did"]
     since_utc = since.astimezone(timezone.utc) if since else None
@@ -427,7 +596,13 @@ async def fetch_posts(
             params["cursor"] = cursor
 
         data = await _api_get(
-            pds_url, access_jwt, "app.bsky.feed.getAuthorFeed", params
+            pds_url,
+            creds["access_jwt"],
+            "app.bsky.feed.getAuthorFeed",
+            params,
+            engine=engine,
+            account_id=account_id,
+            creds=creds,
         )
         feed = data.get("feed") or []
         if not feed:
@@ -494,6 +669,9 @@ async def resolve_reply_target(
         creds["access_jwt"],
         "com.atproto.repo.getRecord",
         {"repo": did, "collection": "app.bsky.feed.post", "rkey": post_id},
+        engine=engine,
+        account_id=account_id,
+        creds=creds,
     )
     cid = record.get("cid")
     if not cid:
@@ -512,7 +690,6 @@ async def publish_outbound(
     """Publish to Bluesky. Returns (post_id, (uri, cid)) for reply chaining."""
     creds = _require_creds(engine, account_id)
     pds_url = creds["pds_url"]
-    access_jwt = creds["access_jwt"]
     did = creds["did"]
     text = outbound.text or ""
     media = outbound.media
@@ -525,7 +702,15 @@ async def publish_outbound(
     }
 
     if media and bytes_list:
-        embed = await _build_embed(pds_url, access_jwt, media, bytes_list)
+        embed = await _build_embed(
+            pds_url,
+            creds["access_jwt"],
+            media,
+            bytes_list,
+            engine=engine,
+            account_id=account_id,
+            creds=creds,
+        )
         if embed:
             record["embed"] = embed
         elif media:
@@ -534,18 +719,27 @@ async def publish_outbound(
     if reply_to:
         parent_uri, parent_cid = reply_to
         record["reply"] = await _get_reply_refs(
-            pds_url, access_jwt, parent_uri, parent_cid
+            pds_url,
+            creds["access_jwt"],
+            parent_uri,
+            parent_cid,
+            engine=engine,
+            account_id=account_id,
+            creds=creds,
         )
 
     result = await _api_post_json(
         pds_url,
-        access_jwt,
+        creds["access_jwt"],
         "com.atproto.repo.createRecord",
         {
             "repo": did,
             "collection": "app.bsky.feed.post",
             "record": record,
         },
+        engine=engine,
+        account_id=account_id,
+        creds=creds,
     )
     uri = result.get("uri")
     cid = result.get("cid")

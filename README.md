@@ -185,7 +185,7 @@ be-everywhere-bot/
 | Constant | Default | Description |
 |----------|---------|-------------|
 | `POST_MIN_AGE_MINUTES` | `30` | Min post age before publishing (watch mode) |
-| `WATCH_INTERVAL_MINUTES` | `20` | Poll interval |
+| `WATCH_CRON` | `0,30 9-23 * * *` | Watch-mode cron schedule (UTC) |
 | `BACKFILL_POST_DELAY_SECONDS` | `3` | Delay between posts in `--since` mode |
 | `WATCH_MAX_PAGES` | `2` | Max X API pages per poll |
 | `WATCH_OVERLAP_HOURS` | `6` | Re-fetch overlap for threads / retries |

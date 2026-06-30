@@ -324,13 +324,20 @@ async def sync_account(
             fetch_since.strftime("%Y-%m-%d %H:%M UTC") if fetch_since else "all",
         )
 
-    posts = await FETCH_HANDLERS[source.network](
-        engine,
-        source.id,
-        since=fetch_since,
-        include_replies=True,
-        max_pages=max_pages,
-    )
+    try:
+        posts = await FETCH_HANDLERS[source.network](
+            engine,
+            source.id,
+            since=fetch_since,
+            include_replies=True,
+            max_pages=max_pages,
+        )
+    except Exception:
+        logger.exception(
+            "[%s] Fetch failed — skipping until next cycle",
+            source_name,
+        )
+        return 0
     mirrored_ids = get_mirrored_post_ids(engine, source.id)
     posts = _filter_original_posts(posts, mirrored_ids)
 
@@ -422,12 +429,19 @@ async def run_sync(
 
     total = 0
     for source in accounts:
-        total += await sync_account(
-            engine,
-            source,
-            accounts,
-            since=since,
-            enforce_min_age=enforce_min_age,
-            post_delay_seconds=post_delay,
-        )
+        source_name = account_display_name(source, engine)
+        try:
+            total += await sync_account(
+                engine,
+                source,
+                accounts,
+                since=since,
+                enforce_min_age=enforce_min_age,
+                post_delay_seconds=post_delay,
+            )
+        except Exception:
+            logger.exception(
+                "[%s] Sync failed — continuing with other accounts",
+                source_name,
+            )
     return total

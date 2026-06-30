@@ -5,13 +5,15 @@ import logging
 import sys
 from datetime import datetime, timezone
 
+from croniter import croniter
+
 import apis.bluesky as bluesky_api
 import apis.mastodon as mastodon_api
 import apis.rss as rss_api
 import apis.telegram as telegram_api
 import apis.threads as threads_api
 import apis.twitter as twitter_api
-from config import WATCH_INTERVAL_MINUTES
+from config import WATCH_CRON
 from db.accounts import account_display_name, list_accounts
 from db.connection import get_engine
 from sync.engine import run_sync
@@ -81,9 +83,19 @@ telegram:
     return parser
 
 
+def _seconds_until_next_cron_run(
+    cron_expr: str, *, now: datetime | None = None
+) -> tuple[float, datetime]:
+    now = now or datetime.now(timezone.utc)
+    next_run = croniter(cron_expr, now).get_next(datetime)
+    if next_run.tzinfo is None:
+        next_run = next_run.replace(tzinfo=timezone.utc)
+    delay = max(0.0, (next_run - now).total_seconds())
+    return delay, next_run
+
+
 async def watch_mode(engine) -> None:
-    interval_seconds = WATCH_INTERVAL_MINUTES * 60
-    logging.info("Watch mode: checking every %d minutes", WATCH_INTERVAL_MINUTES)
+    logging.info("Watch mode: cron %s (UTC)", WATCH_CRON)
 
     while True:
         try:
@@ -92,8 +104,25 @@ async def watch_mode(engine) -> None:
         except Exception:
             logging.exception("Sync cycle failed")
 
-        logging.info("Sleeping for %d minutes...", WATCH_INTERVAL_MINUTES)
-        await asyncio.sleep(interval_seconds)
+        delay, next_run = _seconds_until_next_cron_run(WATCH_CRON)
+        logging.info(
+            "Next sync at %s UTC (in %s)",
+            next_run.strftime("%Y-%m-%d %H:%M"),
+            _format_duration(delay),
+        )
+        await asyncio.sleep(delay)
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    minutes, secs = divmod(int(seconds), 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s" if secs else f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if minutes:
+        return f"{hours}h {minutes}m"
+    return f"{hours}h"
 
 
 async def async_main(args: argparse.Namespace) -> None:
