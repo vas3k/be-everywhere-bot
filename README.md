@@ -1,6 +1,6 @@
 # be-everywhere-bot
 
-A small Python app that **mesh-syncs** your posts across **X (Twitter)**, **Threads**, **Bluesky**, **Telegram**, **Mastodon**, and **RSS feeds**. When a new post appears on any connected account, it is reposted to every other account. The bot tracks what was already synced so nothing is duplicated — including posts it created itself (so a Twitter thread reposted to Telegram is never echoed back to Twitter).
+A small Python app that **mesh-syncs** your posts across **X (Twitter)**, **Threads**, **Bluesky**, **Telegram**, **Mastodon**, **Instagram**, and **RSS feeds**. When a new post appears on any connected account, it is reposted to every other account. The bot tracks what was already synced so nothing is duplicated — including posts it created itself (so a Twitter thread reposted to Telegram is never echoed back to Twitter).
 
 ## Features
 
@@ -10,7 +10,7 @@ A small Python app that **mesh-syncs** your posts across **X (Twitter)**, **Thre
 - **Duplicate protection** — `sync_mappings` + `mirrored_posts` prevent re-syncing and circular reposts
 - **Smart filtering** (X) — skips retweets, quote tweets, `@`-replies, and replies to other people
 - **Link unwrapping** — `t.co` and other shorteners are resolved before posting
-- **Two run modes** — continuous watch (poll every 20 min) and one-shot backfill (`--since`)
+- **Two run modes** — continuous watch (cron schedule) and one-shot backfill (`--since`)
 - **Database migrations** — schema upgrades run automatically on startup
 
 ## Requirements
@@ -33,6 +33,7 @@ uv run python main.py --auth=mastodon
 uv run python main.py --auth=threads
 uv run python main.py --auth=bluesky
 uv run python main.py --auth=rss
+uv run python main.py --auth=instagram
 
 # Run continuous mesh sync
 uv run python main.py
@@ -50,6 +51,7 @@ uv run python main.py --auth=mastodon --label=fedi
 uv run python main.py --auth=threads --label=main
 uv run python main.py --auth=bluesky --label=main
 uv run python main.py --auth=rss --label=blog
+uv run python main.py --auth=instagram --label=main
 ```
 
 Re-running `--auth` with the same network + label updates credentials.
@@ -87,6 +89,18 @@ uv run python main.py --auth=rss --label=blog
 
 Use `--since=YYYY-MM-DD` to import older feed items on first run.
 
+### Instagram (one-way)
+
+Instagram Business or Creator account as a **read-only source**. Feed posts are republished with their caption; active **stories** (24 h window) are synced too. Story slides posted within `POST_MIN_AGE_MINUTES` of each other are merged into one multi-media post on destinations that support it (Telegram, Mastodon, etc.).
+
+Access token from [developers.facebook.com](https://developers.facebook.com/apps/) with scope `instagram_business_basic`. Username is auto-detected from the token.
+
+```bash
+uv run python main.py --auth=instagram --label=main
+```
+
+Instagram is never used as a destination — content flows out, not in.
+
 ## Running
 
 ```bash
@@ -98,7 +112,7 @@ uv run python main.py -v                   # debug logging
 
 ### Watch mode
 
-Polls every **20 minutes**. For each account:
+Polls on a **cron schedule** (see `WATCH_CRON` in `config.py`). For each account:
 
 1. Fetches recent posts (skipping mirrored/sync-created posts)
 2. Skips posts younger than **30 minutes** (editable window on source networks)
@@ -118,6 +132,7 @@ docker compose run --rm bot uv run python main.py --auth=mastodon
 docker compose run --rm bot uv run python main.py --auth=threads
 docker compose run --rm bot uv run python main.py --auth=bluesky
 docker compose run --rm bot uv run python main.py --auth=rss
+docker compose run --rm bot uv run python main.py --auth=instagram
 docker compose up -d
 ```
 
@@ -132,6 +147,7 @@ flowchart TB
         TH["Threads @you"]
         BS["Bluesky @you"]
         RSS["RSS feed"]
+        IG["Instagram @you"]
     end
 
     subgraph sync [Each sync cycle]
@@ -146,6 +162,7 @@ flowchart TB
     TH --> Fetch
     BS --> Fetch
     RSS --> Fetch
+    IG --> Fetch
     Fetch --> Fan --> Map
 ```
 
@@ -246,6 +263,7 @@ Legacy single-account schema is migrated automatically by `001_mesh_accounts`.
 | No accounts configured | Run `--auth=…` for each network |
 | Post not synced yet | May be younger than 30 min in watch mode |
 | Telegram history missing | Bot API can't backfill channels; use `--since` on X/Mastodon |
+| Instagram stories missing | Stories expire after 24 h; run watch mode regularly |
 | Circular repost | Should not happen — check `mirrored_posts` is populated |
 | HTTP 402 on X | Top up API credits at developer.x.com |
 

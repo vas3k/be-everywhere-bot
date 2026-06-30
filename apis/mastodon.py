@@ -173,6 +173,89 @@ def _media_content_type(item: MediaItem) -> str:
     return "video/mp4"
 
 
+_MAX_IMAGES = 4
+_VIDEO_TYPES = frozenset({"video", "animated_gif"})
+
+
+def _is_photo(item: MediaItem) -> bool:
+    return item.media_type == "photo"
+
+
+def _is_video(item: MediaItem) -> bool:
+    return item.media_type in _VIDEO_TYPES
+
+
+def _partition_media_for_publish(
+    media: list[MediaItem],
+    bytes_list: list[bytes],
+    log_id: str,
+) -> tuple[list[tuple[MediaItem, bytes]], list[tuple[MediaItem, bytes]]]:
+    """Split attachments for Mastodon: up to 4 images or 1 video per status, never mixed."""
+    photos = [(item, raw) for item, raw in zip(media, bytes_list) if _is_photo(item)]
+    videos = [(item, raw) for item, raw in zip(media, bytes_list) if _is_video(item)]
+    skipped = len(media) - len(photos) - len(videos)
+    if skipped:
+        logger.warning(
+            "[%s] Mastodon: skipping %d unsupported media attachment(s)",
+            log_id,
+            skipped,
+        )
+
+    if len(photos) > _MAX_IMAGES:
+        logger.warning(
+            "[%s] Mastodon: keeping first %d of %d image(s)",
+            log_id,
+            _MAX_IMAGES,
+            len(photos),
+        )
+        photos = photos[:_MAX_IMAGES]
+
+    if len(videos) > 1:
+        logger.warning(
+            "[%s] Mastodon: keeping first of %d video(s)",
+            log_id,
+            len(videos),
+        )
+        videos = videos[:1]
+
+    return photos, videos
+
+
+async def _post_status(
+    client: httpx.AsyncClient,
+    instance_url: str,
+    access_token: str,
+    text: str,
+    attachments: list[tuple[MediaItem, bytes]],
+    *,
+    in_reply_to_id: str | None = None,
+) -> str:
+    media_ids: list[str] = []
+    for i, (item, raw) in enumerate(attachments):
+        media_id = await _upload_media(
+            client, instance_url, access_token, item, raw, i
+        )
+        media_ids.append(media_id)
+
+    payload: dict[str, str | list[str]] = {"status": text or ""}
+    if media_ids:
+        payload["media_ids"] = media_ids
+    if in_reply_to_id:
+        payload["in_reply_to_id"] = int(in_reply_to_id)
+
+    response = await client.post(
+        f"{instance_url}/api/v1/statuses",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json=payload,
+    )
+    if not response.is_success:
+        raise RuntimeError(f"Mastodon post status: {_api_error(response)}")
+    status_id = response.json().get("id")
+    if not status_id:
+        raise RuntimeError("Mastodon post status: missing id in response")
+    return str(status_id)
+
+
 async def _upload_media(
     client: httpx.AsyncClient,
     instance_url: str,
@@ -343,31 +426,46 @@ async def publish_outbound(
             f"{len(media)} attachment(s) but {len(bytes_list)} downloaded"
         )
 
+    photos: list[tuple[MediaItem, bytes]] = []
+    videos: list[tuple[MediaItem, bytes]] = []
+    if media and bytes_list:
+        photos, videos = _partition_media_for_publish(media, bytes_list, log_id)
+
     async with httpx.AsyncClient(timeout=120.0) as client:
-        media_ids: list[str] = []
-        for i, (item, raw) in enumerate(zip(media, bytes_list)):
-            media_id = await _upload_media(
-                client, instance_url, access_token, item, raw, i
+        if photos and videos:
+            logger.info(
+                "[%s] Mastodon: posting %d image(s) then %d video(s) as reply",
+                log_id,
+                len(photos),
+                len(videos),
             )
-            media_ids.append(media_id)
+            status_id = await _post_status(
+                client,
+                instance_url,
+                access_token,
+                text,
+                photos,
+                in_reply_to_id=in_reply_to_id,
+            )
+            await _post_status(
+                client,
+                instance_url,
+                access_token,
+                "",
+                videos,
+                in_reply_to_id=status_id,
+            )
+            return status_id
 
-        payload: dict[str, str | list[str]] = {"status": text or ""}
-        if media_ids:
-            payload["media_ids"] = media_ids
-        if in_reply_to_id:
-            payload["in_reply_to_id"] = int(in_reply_to_id)
-
-        response = await client.post(
-            f"{instance_url}/api/v1/statuses",
-            headers={"Authorization": f"Bearer {access_token}"},
-            json=payload,
+        attachments = photos or videos
+        return await _post_status(
+            client,
+            instance_url,
+            access_token,
+            text,
+            attachments,
+            in_reply_to_id=in_reply_to_id,
         )
-        if not response.is_success:
-            raise RuntimeError(f"Mastodon post status: {_api_error(response)}")
-        status_id = response.json().get("id")
-        if not status_id:
-            raise RuntimeError("Mastodon post status: missing id in response")
-        return str(status_id)
 
 
 async def publish_post(

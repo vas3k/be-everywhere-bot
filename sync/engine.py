@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.engine import Engine
 
 import apis.bluesky as bluesky_api
+import apis.instagram as instagram_api
 import apis.mastodon as mastodon_api
 import apis.rss as rss_api
 import apis.telegram as telegram_api
@@ -16,6 +17,7 @@ from apis.urls import unwrap_posts_text
 from config import (
     BACKFILL_POST_DELAY_SECONDS,
     NETWORK_BLUESKY,
+    NETWORK_INSTAGRAM,
     NETWORK_MASTODON,
     NETWORK_RSS,
     NETWORK_TELEGRAM,
@@ -53,6 +55,7 @@ FETCH_HANDLERS = {
     NETWORK_THREADS: threads_api.fetch_posts,
     NETWORK_BLUESKY: bluesky_api.fetch_posts,
     NETWORK_RSS: rss_api.fetch_posts,
+    NETWORK_INSTAGRAM: instagram_api.fetch_posts,
 }
 PUBLISH_HANDLERS = {
     NETWORK_TWITTER: twitter_api.publish_outbound,
@@ -68,6 +71,7 @@ DOWNLOAD_HANDLERS = {
     NETWORK_THREADS: threads_api.download_media,
     NETWORK_BLUESKY: bluesky_api.download_media,
     NETWORK_RSS: rss_api.download_media,
+    NETWORK_INSTAGRAM: instagram_api.download_media,
 }
 
 
@@ -191,7 +195,18 @@ async def _publish_batch(
     limits = get_network_limits(dest.network)
     await unwrap_posts_text(batch)
 
-    outbounds = build_outbound_posts(batch, limits)
+    if source.network == NETWORK_INSTAGRAM and instagram_api.is_story_batch(batch):
+        outbounds = instagram_api.build_story_outbounds(batch, limits)
+        if len(batch) > 1:
+            logger.info(
+                "[%s -> %s] Merging %d Instagram story slide(s) into %d post(s)",
+                account_display_name(source, engine),
+                account_display_name(dest, engine),
+                len(batch),
+                len(outbounds),
+            )
+    else:
+        outbounds = build_outbound_posts(batch, limits)
     if len(outbounds) > 1:
         logger.info(
             "[%s -> %s] Publishing %d message(s) in order",
@@ -301,10 +316,14 @@ async def sync_account(
         return 0
 
     fetch_since = _fetch_since(engine, source, since)
-    max_pages = None if since is not None or source.network == NETWORK_RSS else WATCH_MAX_PAGES
+    max_pages = (
+        None
+        if since is not None or source.network in (NETWORK_RSS, NETWORK_INSTAGRAM)
+        else WATCH_MAX_PAGES
+    )
     source_name = account_display_name(source, engine)
 
-    if max_pages and source.network != NETWORK_RSS:
+    if max_pages and source.network not in (NETWORK_RSS, NETWORK_INSTAGRAM):
         logger.info(
             "[%s] Fetching posts since %s (max %d API page(s))",
             source_name,

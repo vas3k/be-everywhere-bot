@@ -162,4 +162,8 @@ def account_display_name(account: Account, engine: Engine) -> str:
         feed_url = creds.get("feed_url")
         if feed_url:
             return feed_url
+    if account.network == "instagram":
+        username = creds.get("username")
+        if username:
+            return f"@{username}"
     return f"{account.network}:{account.label}"

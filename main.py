@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from croniter import croniter
 
 import apis.bluesky as bluesky_api
+import apis.instagram as instagram_api
 import apis.mastodon as mastodon_api
 import apis.rss as rss_api
 import apis.telegram as telegram_api
@@ -46,6 +47,7 @@ telegram:
 {threads_api.AUTH_HELP}
 {bluesky_api.AUTH_HELP}
 {rss_api.AUTH_HELP}
+{instagram_api.AUTH_HELP}
 """,
     )
     parser.add_argument(
@@ -55,7 +57,7 @@ telegram:
     )
     parser.add_argument(
         "--auth",
-        choices=["twitter", "telegram", "mastodon", "threads", "bluesky", "rss"],
+        choices=["twitter", "telegram", "mastodon", "threads", "bluesky", "rss", "instagram"],
         metavar="NETWORK",
         help="Configure a network account and store credentials in SQLite.",
     )
@@ -161,6 +163,9 @@ async def async_main(args: argparse.Namespace) -> None:
         return
     if args.auth == "rss":
         await rss_api.authenticate(engine, label=args.label)
+        return
+    if args.auth == "instagram":
+        await instagram_api.authenticate(engine, label=args.label)
         return
 
     if args.since:

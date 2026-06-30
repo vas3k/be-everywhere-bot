@@ -4,7 +4,7 @@ from pathlib import Path
 # --- Timing ---
 
 WATCH_CRON = "0,30 9-23 * * *"  # :00 and :30 each hour, 09:00–23:30 UTC
-POST_MIN_AGE_MINUTES = 30
+POST_MIN_AGE_MINUTES = 60
 BACKFILL_POST_DELAY_SECONDS = 3  # pause between posts during --since backfill
 
 # Watch mode: only fetch recent own posts (owned reads are $0.001/post on X API)
@@ -25,6 +25,7 @@ NETWORK_MASTODON = "mastodon"
 NETWORK_THREADS = "threads"
 NETWORK_BLUESKY = "bluesky"
 NETWORK_RSS = "rss"
+NETWORK_INSTAGRAM = "instagram"
 
 NETWORKS: list[str] = [
     NETWORK_TWITTER,
@@ -33,10 +34,11 @@ NETWORKS: list[str] = [
     NETWORK_THREADS,
     NETWORK_BLUESKY,
     NETWORK_RSS,
+    NETWORK_INSTAGRAM,
 ]
 
 # Read-only sources — mesh sync publishes from these but never to them.
-SOURCE_ONLY_NETWORKS: frozenset[str] = frozenset({NETWORK_RSS})
+SOURCE_ONLY_NETWORKS: frozenset[str] = frozenset({NETWORK_RSS, NETWORK_INSTAGRAM})
 
 
 @dataclass(frozen=True)
@@ -66,10 +68,17 @@ class BlueskyAppConfig:
     default_pds: str = "https://bsky.social"
 
 
+@dataclass(frozen=True)
+class InstagramAppConfig:
+    api_base_url: str = "https://graph.instagram.com/v21.0"
+    facebook_graph_url: str = "https://graph.facebook.com/v21.0"
+
+
 TWITTER_APP = TwitterAppConfig()
 TELEGRAM_APP = TelegramAppConfig()
 THREADS_APP = ThreadsAppConfig()
 BLUESKY_APP = BlueskyAppConfig()
+INSTAGRAM_APP = InstagramAppConfig()
 
 TELEGRAM_LIMITS = NetworkLimits(max_text=4096, max_caption=1024, max_media_group=4)
 MASTODON_LIMITS = NetworkLimits(max_text=500, max_caption=500, max_media_group=4)
@@ -93,3 +102,4 @@ MASTODON_CREDENTIAL_KEYS = ("instance_url", "access_token", "username", "account
 THREADS_CREDENTIAL_KEYS = ("access_token", "user_id", "username")
 BLUESKY_CREDENTIAL_KEYS = ("handle", "did", "access_jwt", "refresh_jwt", "pds_url")
 RSS_CREDENTIAL_KEYS = ("feed_url",)
+INSTAGRAM_CREDENTIAL_KEYS = ("access_token", "user_id", "username")
