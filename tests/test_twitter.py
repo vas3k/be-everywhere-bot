@@ -1,14 +1,39 @@
 from datetime import datetime, timezone
 
+from datetime import datetime, timezone
+
 from apis.twitter import (
     _best_video_url,
     _extract_media,
+    _should_fetch_next_page,
     _skip_reason,
     _strip_trailing_links,
     _tweet_to_post,
     _twitter_media_type,
 )
 from apis.types import MediaItem, Post
+
+
+def test_should_fetch_next_page_requires_full_page():
+    since = datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc)
+    tweets = [
+        {"created_at": "2026-06-30T11:00:00Z"},
+        {"created_at": "2026-06-30T10:30:00Z"},
+    ]
+    assert _should_fetch_next_page(tweets, since, page_size=10) is False
+
+
+def test_should_fetch_next_page_when_all_newer_than_since():
+    since = datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc)
+    tweets = [{"created_at": "2026-06-30T11:00:00Z"} for _ in range(10)]
+    assert _should_fetch_next_page(tweets, since, page_size=10) is True
+
+
+def test_should_fetch_next_page_stops_when_any_tweet_is_old():
+    since = datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc)
+    tweets = [{"created_at": "2026-06-30T11:00:00Z"} for _ in range(9)]
+    tweets.append({"created_at": "2026-06-30T09:00:00Z"})
+    assert _should_fetch_next_page(tweets, since, page_size=10) is False
 
 
 def test_best_video_url_picks_highest_bitrate():

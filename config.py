@@ -4,11 +4,12 @@ from pathlib import Path
 # --- Timing ---
 
 WATCH_CRON = "0,30 9-23 * * *"  # :00 and :30 each hour, 09:00–23:30 UTC
-POST_MIN_AGE_MINUTES = 60
+POST_MIN_AGE_MINUTES = 60  # do not re-post posts younger than this (may be still in progress)
 BACKFILL_POST_DELAY_SECONDS = 3  # pause between posts during --since backfill
 
 # Watch mode: only fetch recent own posts (owned reads are $0.001/post on X API)
-WATCH_MAX_PAGES = 2  # cap API pages per poll (~200 raw posts max)
+TWITTER_FETCH_PAGE_SIZE = 10  # tweets per page; paginate only if a full page is all new
+TWITTER_FETCH_MAX_PAGES = 10  # safety cap on X timeline pages per poll
 WATCH_OVERLAP_HOURS = 6  # re-fetch window for threads / failed publishes
 WATCH_INITIAL_LOOKBACK_HOURS = 48  # first run before any sync state exists
 

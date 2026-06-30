@@ -11,7 +11,7 @@ from utils.http_utils import format_api_error, parse_error_detail, twitter_api_e
 from utils.text_utils import strip_trailing_patterns
 from apis.types import MediaItem, OutboundPost, Post, PublishResult
 from utils.posts import sort_chronologically
-from config import NETWORK_TWITTER, TWITTER_APP
+from config import NETWORK_TWITTER, TWITTER_APP, TWITTER_FETCH_PAGE_SIZE
 from db.accounts import (
     Account,
     create_account,
@@ -52,6 +52,22 @@ _TRAILING_STATUS_URL = re.compile(
 
 def _parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _should_fetch_next_page(
+    tweets: list[dict[str, Any]],
+    since_utc: datetime | None,
+    *,
+    page_size: int = TWITTER_FETCH_PAGE_SIZE,
+) -> bool:
+    """Fetch another page only when this one is full and every tweet is newer than since."""
+    if len(tweets) < page_size:
+        return False
+    if since_utc is None:
+        return True
+    return all(
+        _parse_datetime(tweet["created_at"]) >= since_utc for tweet in tweets
+    )
 
 
 def _best_video_url(media: dict[str, Any]) -> str | None:
@@ -299,7 +315,7 @@ async def fetch_posts(
     user_id = creds["user_id"]
 
     base_params: dict[str, str] = {
-        "max_results": "100",
+        "max_results": str(TWITTER_FETCH_PAGE_SIZE),
         "tweet.fields": TWEET_FIELDS,
         "expansions": EXPANSIONS,
         "media.fields": MEDIA_FIELDS,
@@ -332,13 +348,11 @@ async def fetch_posts(
         tweets = data.get("data") or []
         includes = data.get("includes") or {}
         raw_count += len(tweets)
-        reached_since_boundary = False
 
         for tweet in tweets:
             if since_utc:
                 created_at = _parse_datetime(tweet["created_at"])
                 if created_at < since_utc:
-                    reached_since_boundary = True
                     continue
             reason = _skip_reason(tweet)
             if reason:
@@ -348,7 +362,7 @@ async def fetch_posts(
 
         meta = data.get("meta") or {}
         pagination_token = meta.get("next_token")
-        if since_utc and reached_since_boundary:
+        if not _should_fetch_next_page(tweets, since_utc):
             break
         if max_pages is not None and page >= max_pages:
             break

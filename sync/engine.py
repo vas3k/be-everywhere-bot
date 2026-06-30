@@ -28,7 +28,7 @@ from config import (
     REPLY_FILTER_NETWORKS,
     SOURCE_ONLY_NETWORKS,
     WATCH_INITIAL_LOOKBACK_HOURS,
-    WATCH_MAX_PAGES,
+    TWITTER_FETCH_MAX_PAGES,
     WATCH_OVERLAP_HOURS,
 )
 from db.accounts import Account, account_display_name, list_accounts
@@ -274,7 +274,7 @@ async def sync_account(
     max_pages = (
         None
         if since is not None or source.network in (NETWORK_RSS, NETWORK_INSTAGRAM)
-        else WATCH_MAX_PAGES
+        else TWITTER_FETCH_MAX_PAGES
     )
     source_name = account_display_name(source, engine)
 

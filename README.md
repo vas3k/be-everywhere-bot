@@ -225,7 +225,8 @@ tests/                      # pytest suite
 | `POST_MIN_AGE_MINUTES` | `30` | Min post age before publishing (watch mode) |
 | `WATCH_CRON` | `0,30 9-23 * * *` | Watch-mode cron schedule (UTC) |
 | `BACKFILL_POST_DELAY_SECONDS` | `3` | Delay between posts in `--since` mode |
-| `WATCH_MAX_PAGES` | `2` | Max X API pages per poll |
+| `TWITTER_FETCH_MAX_PAGES` | `10` | Max X API pages per poll (safety cap) |
+| `TWITTER_FETCH_PAGE_SIZE` | `10` | X tweets per page; next page only if all are new |
 | `WATCH_OVERLAP_HOURS` | `6` | Re-fetch overlap for threads / retries |
 
 ## Database migrations
