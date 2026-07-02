@@ -29,15 +29,54 @@ def exclude_source_only_posts(
     return kept
 
 
+def _has_connected_parent(
+    post: Post,
+    by_id: dict[str, Post],
+    cache: dict[str, bool],
+) -> bool:
+    """True when every ancestor in the reply chain is present (root included)."""
+    if post.id in cache:
+        return cache[post.id]
+    if not post.in_reply_to_id:
+        result = True
+    elif post.in_reply_to_id not in by_id:
+        result = False
+    else:
+        result = _has_connected_parent(by_id[post.in_reply_to_id], by_id, cache)
+    cache[post.id] = result
+    return result
+
+
+def exclude_orphan_thread_replies(posts: list[Post]) -> list[Post]:
+    """Drop replies whose parent chain is broken (e.g. root skipped as quote/retweet)."""
+    if not posts:
+        return []
+
+    by_id = {post.id: post for post in posts}
+    cache: dict[str, bool] = {}
+    kept: list[Post] = []
+    skipped = 0
+
+    for post in posts:
+        if _has_connected_parent(post, by_id, cache):
+            kept.append(post)
+        else:
+            skipped += 1
+
+    if skipped:
+        logger.info(
+            "Filtered out %d orphaned thread reply/replies (missing parent in fetch)",
+            skipped,
+        )
+    return kept
+
+
 def filter_own_threads(posts: list[Post]) -> list[Post]:
-    """Drop replies to other people; keep own threads and root posts."""
+    """Drop replies to other people and orphaned tails of incomplete threads."""
     if not posts:
         return []
 
     author_id = posts[0].author_id
-    own_ids = {p.id for p in posts}
-    own_thread_roots = {p.id for p in posts if p.conversation_id == p.id}
-
     kept: list[Post] = []
     skipped = 0
 
@@ -46,16 +85,9 @@ def filter_own_threads(posts: list[Post]) -> list[Post]:
             if str(post.in_reply_to_user_id) != str(author_id):
                 skipped += 1
                 continue
-        elif post.in_reply_to_id is not None:
-            in_own_thread = (
-                post.in_reply_to_id in own_ids
-                or post.conversation_id in own_thread_roots
-            )
-            if not in_own_thread:
-                skipped += 1
-                continue
         kept.append(post)
 
     if skipped:
         logger.info("Filtered out %d reply/replies to other people", skipped)
-    return kept
+
+    return exclude_orphan_thread_replies(kept)
