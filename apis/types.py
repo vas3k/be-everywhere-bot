@@ -39,4 +39,5 @@ class PublishResult:
 
     post_id: str
     reply_ref: str | None = None
+    mirrored_ids: tuple[str, ...] = ()
 

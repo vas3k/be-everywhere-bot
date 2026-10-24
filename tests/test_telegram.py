@@ -11,14 +11,14 @@ from apis.telegram import (
     _file_field,
     _media_filename,
     _media_group_type,
-    _merge_album_posts,
     _message_to_post,
     _retry_after_seconds,
     _send_method,
     publish_outbound,
 )
 from apis.types import MediaItem, OutboundPost
-from config import NETWORK_TELEGRAM
+from config import NETWORK_TELEGRAM, TELEGRAM_LIMITS
+from utils.thread_processor import build_outbound_posts
 from db.accounts import create_account, set_credentials
 
 
@@ -97,9 +97,9 @@ def test_merge_album_posts_combines_slides(post_factory, utc_now):
         conversation_id="group-1",
         media=[MediaItem(url=f"{TG_FILE_PREFIX}b", media_type="photo")],
     )
-    merged = _merge_album_posts([slide2, slide1])
+    merged = build_outbound_posts([slide2, slide1], TELEGRAM_LIMITS)
     assert len(merged) == 1
-    assert merged[0].id == "10"
+    assert merged[0].source_post_ids == ["10", "11"]
     assert merged[0].text == "Album caption"
     assert len(merged[0].media) == 2
 
@@ -168,3 +168,82 @@ async def test_publish_outbound_send_media_group(engine):
     result = await publish_outbound(engine, account.id, outbound, [b"a", b"b"])
     assert result.post_id == "99"
     assert b"sendMediaGroup" in captured["media"] or b"media" in captured["media"]
+
+
+@respx.mock
+async def test_shared_bot_saves_every_channel_before_acknowledging_updates(engine):
+    from apis.telegram import fetch_posts
+    from db.accounts import get_all_credentials
+    from db.posts import load_posts
+
+    first = create_account(engine, "telegram", "first", "@first")
+    second = create_account(engine, "telegram", "second", "@second")
+    for account, channel in ((first, "@first"), (second, "@second")):
+        set_credentials(engine, account.id, {"bot_token": "shared", "channel_id": channel, "update_offset": "0"})
+    updates = [
+        {"update_id": 1, "channel_post": {"message_id": 10, "date": 1782813600, "text": "First channel", "chat": {"id": 1, "username": "first"}}},
+        {"update_id": 2, "channel_post": {"message_id": 20, "date": 1782813600, "text": "Second channel", "chat": {"id": 2, "username": "second"}}},
+    ]
+
+    def telegram_response(request):
+        if request.url.params["offset"] == "0":
+            return httpx.Response(200, json={"ok": True, "result": updates})
+        assert [post.text for post in load_posts(engine, first.id)] == ["First channel"]
+        assert [post.text for post in load_posts(engine, second.id)] == ["Second channel"]
+        assert get_all_credentials(engine, second.id)["update_offset"] == "3"
+        return httpx.Response(200, json={"ok": True, "result": []})
+
+    route = respx.get("https://api.telegram.org/botshared/getUpdates").mock(side_effect=telegram_response)
+    posts = await fetch_posts(engine, first.id)
+    assert [post.text for post in posts] == ["First channel"]
+    assert route.call_count == 2
+    assert await fetch_posts(engine, second.id) == []
+    assert [post.text for post in load_posts(engine, second.id)] == ["Second channel"]
+
+
+@respx.mock
+async def test_telegram_retains_downloaded_page_if_next_page_fails(engine):
+    from apis.telegram import fetch_posts
+    from db.posts import load_posts
+
+    account = create_account(engine, "telegram", "main", "@channel")
+    set_credentials(engine, account.id, {"bot_token": "token", "channel_id": "@channel"})
+    respx.get("https://api.telegram.org/bottoken/getUpdates").mock(side_effect=[
+        httpx.Response(200, json={"result": [{"update_id": 1, "channel_post": {
+            "message_id": 10, "date": 1782813600, "text": "Saved first", "chat": {"username": "channel"},
+        }}]}),
+        httpx.Response(503),
+    ])
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await fetch_posts(engine, account.id)
+    assert [post.text for post in load_posts(engine, account.id)] == ["Saved first"]
+
+
+@respx.mock
+async def test_shared_destination_updates_are_acknowledged_without_becoming_source_posts(engine):
+    from apis.telegram import fetch_posts
+    from db.accounts import get_account
+    from db.posts import load_posts
+    from db.projects import create_project
+    from db.sync_state import get_mirrored_post_ids, record_mirrored_post
+
+    project = create_project(engine, "Work")
+    first = create_account(engine, "telegram", "main", "@Channel", sync_role="destination_only")
+    second = create_account(engine, "telegram", "main", "-100123", project_id=project.id, sync_role="destination_only")
+    reader = create_account(engine, "telegram", "reader", "@reader", sync_role="source_only")
+    for account, channel in ((first, "@channel"), (second, "-100123"), (reader, "@reader")):
+        set_credentials(engine, account.id, {"bot_token": "shared", "channel_id": channel})
+    record_mirrored_post(engine, first.id, "10")
+    respx.get("https://api.telegram.org/botshared/getUpdates").mock(side_effect=[
+        httpx.Response(200, json={"result": [{"update_id": 1, "channel_post": {
+            "message_id": 10, "date": 1782813600, "text": "Mirrored", "chat": {"id": -100123, "username": "channel"},
+        }}]}),
+        httpx.Response(200, json={"result": []}),
+    ])
+
+    await fetch_posts(engine, reader.id)
+
+    assert load_posts(engine, first.id) == load_posts(engine, second.id) == []
+    assert get_account(engine, first.id).remote_id == get_account(engine, second.id).remote_id == "-100123"
+    assert get_mirrored_post_ids(engine, second.id) == {"10"}

@@ -5,19 +5,24 @@ import re
 from datetime import datetime, timezone
 
 import httpx
-from sqlalchemy.engine import Engine
+from sqlalchemy import func, or_, update
+from sqlalchemy.engine import Connection, Engine
 
 from utils.posts import sort_chronologically
 from apis.types import MediaItem, OutboundPost, Post, PublishResult
 from config import NETWORK_TELEGRAM, TELEGRAM_APP
 from db.accounts import (
     Account,
-    create_account,
-    find_account,
+    save_account,
+    get_account,
     get_all_credentials,
-    set_credential,
-    set_credentials,
+    find_account,
+    list_accounts,
 )
+
+from db.helpers import write_credentials
+from db.posts import save_posts
+from db.schema import accounts
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +69,9 @@ def _retry_after_seconds(response: httpx.Response) -> int | None:
 
 
 async def _post_with_retry(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
-    while True:
+    for attempt in range(3):
         response = await client.post(url, **kwargs)
-        if response.status_code != 429:
+        if response.status_code != 429 or attempt == 2:
             return response
         wait = _retry_after_seconds(response) or 30
         logger.warning("Telegram rate limit — waiting %ds", wait)
@@ -113,41 +118,6 @@ def _extract_media(message: dict) -> list[MediaItem]:
     return items
 
 
-def _merge_album_posts(posts: list[Post]) -> list[Post]:
-    """Merge Telegram album slides (shared media_group_id) into one Post."""
-    albums: dict[str, list[Post]] = {}
-    merged: list[Post] = []
-
-    for post in posts:
-        if post.conversation_id != post.id:
-            albums.setdefault(post.conversation_id, []).append(post)
-        else:
-            merged.append(post)
-
-    for slides in albums.values():
-        slides = sort_chronologically(slides)
-        first = slides[0]
-        media: list[MediaItem] = []
-        text = ""
-        for slide in slides:
-            media.extend(slide.media)
-            if not text and slide.text.strip():
-                text = slide.text
-        merged.append(
-            Post(
-                id=first.id,
-                text=text,
-                created_at=first.created_at,
-                conversation_id=first.conversation_id,
-                author_id=first.author_id,
-                media=media,
-                is_thread_root=True,
-            )
-        )
-
-    return sort_chronologically(merged)
-
-
 def _apply_reply_to(data: dict[str, str], reply_to: str | None) -> None:
     if reply_to:
         data["reply_to_message_id"] = reply_to
@@ -184,27 +154,47 @@ def _message_to_post(message: dict, channel_id: str) -> Post | None:
     )
 
 
-async def authenticate(engine: Engine, label: str = "default") -> Account:
-    bot_token = input("Telegram bot token: ").strip()
-    channel_id = input("Telegram channel ID (e.g. @mychannel or -1001234567890): ").strip()
+def record_chat_identity(connection: Connection, account_id: int, chat: dict) -> None:
+    if not chat.get("id"):
+        return
+    remote_id = str(chat["id"])
+    aliases = [remote_id]
+    if chat.get("username"):
+        aliases.append("@" + chat["username"].lower())
+    connection.execute(update(accounts).where(
+        accounts.c.network == NETWORK_TELEGRAM,
+        or_(accounts.c.id == account_id, func.lower(accounts.c.remote_id).in_(aliases)),
+    ).values(remote_id=remote_id))
+
+
+async def authenticate(engine: Engine, label: str = "default", *, project_id: int = 1, sync_role: str | None = None, credentials: dict[str, str] | None = None) -> Account:
+    report = print if credentials is None else logger.info
+    bot_token = (credentials.get("bot_token", "") if credentials is not None else input("Telegram bot token: ")).strip()
+    channel_id = (credentials.get("channel_id", "") if credentials is not None else input("Telegram channel ID (e.g. @mychannel or -1001234567890): ")).strip()
+
+    if not bot_token or not channel_id:
+        raise ValueError("Bot token and channel ID are required")
 
     async with httpx.AsyncClient() as client:
         response = await client.get(_api_url(bot_token, "getMe"))
         response.raise_for_status()
-        bot = response.json()["result"]
+        if not response.json().get("result", {}).get("id"):
+            raise ValueError("Telegram returned no bot identity")
+        response = await client.get(_api_url(bot_token, "getChat"), params={"chat_id": channel_id})
+        response.raise_for_status()
+        chat = response.json().get("result") or {}
+        if not chat.get("id"):
+            raise ValueError("Telegram returned no channel identity")
 
-    creds = {"bot_token": bot_token, "channel_id": channel_id, "update_offset": "0"}
-    remote_id = channel_id
+    existing = find_account(engine, NETWORK_TELEGRAM, label, project_id=project_id)
+    previous = get_all_credentials(engine, existing.id) if existing else {}
+    offset = previous.get("update_offset", "0") if previous.get("bot_token") == bot_token else "0"
+    creds = {"bot_token": bot_token, "channel_id": channel_id, "update_offset": offset}
 
-    existing = find_account(engine, NETWORK_TELEGRAM, label)
-    if existing:
-        set_credentials(engine, existing.id, creds)
-        print(f"Telegram account '{label}' updated: @{bot['username']} -> {channel_id}")
-        return existing
-
-    account = create_account(engine, NETWORK_TELEGRAM, label, remote_id)
-    set_credentials(engine, account.id, creds)
-    print(f"Telegram account '{label}' configured: @{bot['username']} -> {channel_id}")
+    account = save_account(engine, NETWORK_TELEGRAM, label, str(chat["id"]), creds, project_id=project_id, sync_role=sync_role)
+    with engine.begin() as connection:
+        record_chat_identity(connection, account.id, chat)
+    report(f"Configured {account.network}/{account.label}")
     return account
 
 
@@ -215,49 +205,53 @@ async def fetch_posts(
     include_replies: bool = True,
     max_pages: int | None = None,
 ) -> list[Post]:
-    """Fetch channel posts delivered to the bot via getUpdates."""
+    if get_account(engine, account_id).sync_role == "destination_only":
+        return []
     bot_token, channel_id = await _get_bot_credentials(engine, account_id)
-    creds = get_all_credentials(engine, account_id)
-    offset = int(creds.get("update_offset") or 0)
-    since_utc = since.astimezone(timezone.utc) if since else None
+    peers = {}
+    source_ids = set()
+    for account in list_accounts(engine, NETWORK_TELEGRAM):
+        credentials = get_all_credentials(engine, account.id)
+        if credentials.get("bot_token") == bot_token:
+            peers[account.id] = credentials
+            if account.sync_role in ("source_only", "source_and_destination"):
+                source_ids.add(account.id)
+    offset = max(int(credentials.get("update_offset") or 0) for credentials in peers.values())
+    posts = []
 
-    if since_utc:
-        logger.warning(
-            "Telegram account %d: Bot API cannot backfill channel history; "
-            "only posts received via getUpdates since bot setup will sync",
-            account_id,
-        )
-
-    posts: list[Post] = []
     async with httpx.AsyncClient(timeout=60.0) as client:
         while True:
             response = await client.get(
                 _api_url(bot_token, "getUpdates"),
-                params={
-                    "offset": offset,
-                    "timeout": 0,
-                    "allowed_updates": json.dumps(["channel_post"]),
-                },
+                params={"offset": offset, "timeout": 0, "allowed_updates": json.dumps(["channel_post"])},
             )
             response.raise_for_status()
             updates = response.json().get("result") or []
             if not updates:
                 break
 
-            for update in updates:
-                offset = max(offset, update["update_id"] + 1)
-                message = update.get("channel_post")
-                if not message:
-                    continue
-                post = _message_to_post(message, channel_id)
-                if not post:
-                    continue
-                if since_utc and post.created_at < since_utc:
-                    continue
-                posts.append(post)
+            offset = max(update["update_id"] for update in updates) + 1
+            # A bot has one update queue for every channel. Save all configured channels
+            # before the next getUpdates request acknowledges these updates remotely.
+            with engine.begin() as connection:
+                for peer_id, credentials in peers.items():
+                    incoming = []
+                    for update in updates:
+                        message = update.get("channel_post")
+                        if message:
+                            post = _message_to_post(message, credentials["channel_id"])
+                            if post:
+                                record_chat_identity(connection, peer_id, message.get("chat") or {})
+                                if peer_id in source_ids:
+                                    incoming.append(post)
+                    save_posts(connection, peer_id, incoming)
+                    write_credentials(connection, peer_id, {"update_offset": str(offset)})
+                    if peer_id == account_id:
+                        posts.extend(incoming)
 
-    set_credential(engine, account_id, "update_offset", str(offset))
-    return _merge_album_posts(posts)
+    if since:
+        posts = [post for post in posts if post.created_at >= since]
+    return sort_chronologically(posts)
 
 
 async def download_media(
@@ -340,7 +334,10 @@ async def publish_outbound(
             )
             if not response.is_success:
                 raise RuntimeError(f"Telegram sendMessage: {_telegram_api_error(response)}")
-            post_id = str(response.json()["result"]["message_id"])
+            message = response.json()["result"]
+            with engine.begin() as connection:
+                record_chat_identity(connection, account_id, message.get("chat") or {})
+            post_id = str(message["message_id"])
             return PublishResult(post_id=post_id, reply_ref=post_id)
 
         if len(media) == 1:
@@ -360,7 +357,10 @@ async def publish_outbound(
             )
             if not response.is_success:
                 raise RuntimeError(f"Telegram {method}: {_telegram_api_error(response)}")
-            post_id = str(response.json()["result"]["message_id"])
+            message = response.json()["result"]
+            with engine.begin() as connection:
+                record_chat_identity(connection, account_id, message.get("chat") or {})
+            post_id = str(message["message_id"])
             return PublishResult(post_id=post_id, reply_ref=post_id)
 
         media_group = []
@@ -389,5 +389,10 @@ async def publish_outbound(
         if not response.is_success:
             raise RuntimeError(f"Telegram sendMediaGroup: {_telegram_api_error(response)}")
         messages = response.json()["result"]
+        with engine.begin() as connection:
+            record_chat_identity(connection, account_id, messages[0].get("chat") or {})
         post_id = str(messages[0]["message_id"])
-        return PublishResult(post_id=post_id, reply_ref=post_id)
+        return PublishResult(
+            post_id=post_id, reply_ref=post_id,
+            mirrored_ids=tuple(str(message["message_id"]) for message in messages),
+        )

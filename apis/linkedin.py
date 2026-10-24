@@ -11,10 +11,8 @@ from apis.types import MediaItem, OutboundPost, Post, PublishResult
 from config import LINKEDIN_APP, NETWORK_LINKEDIN
 from db.accounts import (
     Account,
-    create_account,
-    find_account,
+    save_account,
     get_all_credentials,
-    set_credentials,
     update_remote_id,
 )
 from utils.http_utils import format_api_error, parse_error_detail
@@ -137,8 +135,9 @@ async def _lookup_userinfo(access_token: str) -> dict[str, Any]:
         return response.json()
 
 
-async def authenticate(engine: Engine, label: str = "default") -> Account:
-    access_token = input("LinkedIn access token: ").strip()
+async def authenticate(engine: Engine, label: str = "default", *, project_id: int = 1, sync_role: str | None = None, credentials: dict[str, str] | None = None) -> Account:
+    report = print if credentials is None else logger.info
+    access_token = (credentials.get("access_token", "") if credentials is not None else input("LinkedIn access token: ")).strip()
     if not access_token:
         raise ValueError("Access token is required")
 
@@ -149,7 +148,7 @@ async def authenticate(engine: Engine, label: str = "default") -> Account:
 
     person_urn = f"urn:li:person:{sub}"
     display_name = (
-        input("Display name (optional, Enter to auto-detect): ").strip()
+        (credentials.get("display_name", "") if credentials is not None else input("Display name (optional, Enter to auto-detect): ")).strip()
         or profile.get("name")
         or profile.get("email")
         or sub
@@ -161,16 +160,8 @@ async def authenticate(engine: Engine, label: str = "default") -> Account:
         "display_name": display_name,
     }
 
-    existing = find_account(engine, NETWORK_LINKEDIN, label)
-    if existing:
-        set_credentials(engine, existing.id, creds)
-        update_remote_id(engine, existing.id, sub)
-        print(f"LinkedIn account '{label}' updated for {display_name}")
-        return existing
-
-    account = create_account(engine, NETWORK_LINKEDIN, label, sub)
-    set_credentials(engine, account.id, creds)
-    print(f"LinkedIn account '{label}' configured for {display_name}")
+    account = save_account(engine, NETWORK_LINKEDIN, label, sub, creds, project_id=project_id, sync_role=sync_role)
+    report(f"Configured {account.network}/{account.label}")
     return account
 
 

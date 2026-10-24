@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -21,11 +22,9 @@ from utils.posts import sort_chronologically
 from config import INSTAGRAM_APP, NETWORK_INSTAGRAM, POST_MIN_AGE_MINUTES, NetworkLimits
 from db.accounts import (
     Account,
-    create_account,
-    find_account,
+    save_account,
     get_all_credentials,
     set_credential,
-    set_credentials,
     update_remote_id,
 )
 
@@ -156,7 +155,7 @@ def _assign_story_groups(stories: list[Post], window_minutes: int) -> list[Post]
 
     grouped: list[Post] = []
     for cluster in clusters:
-        conv_id = f"{STORY_GROUP_PREFIX}{cluster[0].id}_{cluster[-1].id}"
+        conv_id = f"{STORY_GROUP_PREFIX}{cluster[0].id}"
         for story in cluster:
             grouped.append(
                 Post(
@@ -176,62 +175,26 @@ def is_story_batch(batch: list[Post]) -> bool:
     return bool(batch) and all(post.id.startswith(STORY_ID_PREFIX) for post in batch)
 
 
-def _chunk_media(items: list[MediaItem], size: int) -> list[list[MediaItem]]:
-    return [items[i : i + size] for i in range(0, len(items), size)]
-
-
 def build_outbounds(batch: list[Post], limits: NetworkLimits) -> list[OutboundPost]:
-    """Shape Instagram source posts into destination-sized outbound messages."""
     from utils.thread_processor import build_outbound_posts
 
     if is_story_batch(batch):
-        outbounds = build_story_outbounds(batch, limits)
-        if len(batch) > 1:
-            logger.info(
-                "Instagram: merged %d story slide(s) into %d post(s)",
-                len(batch),
-                len(outbounds),
-            )
-        return outbounds
+        return build_story_outbounds(batch, limits)
     return build_outbound_posts(batch, limits)
 
 
-def build_story_outbounds(
-    batch: list[Post], limits: NetworkLimits
-) -> list[OutboundPost]:
-    """Merge story slides into one or more multi-media outbounds when supported."""
+def build_story_outbounds(batch: list[Post], limits: NetworkLimits) -> list[OutboundPost]:
+    from utils.thread_processor import build_outbound_posts
+
     ordered = sort_chronologically(batch)
-    source_ids = [post.id for post in ordered]
-
-    if limits.max_media_group <= 1:
-        return [
-            OutboundPost(
-                text=post.text,
-                media=list(post.media),
-                source_post_ids=[post.id],
-            )
-            for post in ordered
-            if post.media
-        ]
-
-    all_media: list[MediaItem] = []
-    for post in ordered:
-        all_media.extend(post.media)
-
-    if not all_media:
+    if not ordered:
         return []
+    if limits.max_media_group == 1:
+        return [outbound for post in ordered for outbound in build_outbound_posts([post], limits)]
 
     caption = next((post.text for post in ordered if post.text.strip()), "")
-    outbounds: list[OutboundPost] = []
-    for i, media_chunk in enumerate(_chunk_media(all_media, limits.max_media_group)):
-        outbounds.append(
-            OutboundPost(
-                text=caption if i == 0 else "",
-                media=media_chunk,
-                source_post_ids=source_ids,
-            )
-        )
-    return outbounds
+    slides = [replace(post, text=caption if index == 0 else "") for index, post in enumerate(ordered)]
+    return build_outbound_posts(slides, limits)
 
 
 def _require_creds(engine: Engine, account_id: int) -> dict[str, str]:
@@ -332,9 +295,11 @@ async def _ensure_session(engine: Engine, account_id: int) -> dict[str, str]:
     return creds
 
 
-async def authenticate(engine: Engine, label: str = "default") -> Account:
-    print(AUTH_HELP)
-    access_token = input("Access Token: ").strip()
+async def authenticate(engine: Engine, label: str = "default", *, project_id: int = 1, sync_role: str | None = None, credentials: dict[str, str] | None = None) -> Account:
+    report = print if credentials is None else logger.info
+    if credentials is None:
+        print(AUTH_HELP)
+    access_token = (credentials.get("access_token", "") if credentials is not None else input("Access Token: ")).strip()
     if not access_token:
         raise RuntimeError("Access token is required.")
 
@@ -344,13 +309,13 @@ async def authenticate(engine: Engine, label: str = "default") -> Account:
     app_creds: dict[str, str] = {}
     if token_config is FACEBOOK_TOKEN:
         # Facebook-login tokens can only be renewed with full app credentials.
-        app_id = input("Facebook App ID: ").strip()
+        app_id = (credentials.get("app_id", "") if credentials is not None else input("Facebook App ID: ")).strip()
         if app_id:
             app_creds["app_id"] = app_id
-    app_secret = input("App Secret (optional, press Enter to skip): ").strip()
+    app_secret = (credentials.get("app_secret", "") if credentials is not None else input("App Secret (optional, press Enter to skip): ")).strip()
     if app_secret:
         app_creds["app_secret"] = app_secret
-    username = input("Username (optional, press Enter to auto-detect): ").strip().lstrip("@")
+    username = (credentials.get("username", "") if credentials is not None else input("Username (optional, press Enter to auto-detect): ")).strip().lstrip("@")
 
     token = await initialize_token(token_config, access_token, app_creds)
     creds = {
@@ -361,27 +326,10 @@ async def authenticate(engine: Engine, label: str = "default") -> Account:
         "token_kind": profile["token_kind"],
     }
 
-    existing = find_account(engine, NETWORK_INSTAGRAM, label)
-    if existing:
-        set_credentials(engine, existing.id, creds)
-        update_remote_id(engine, existing.id, creds["user_id"])
-        action = "updated"
-        account = existing
-    else:
-        account = create_account(engine, NETWORK_INSTAGRAM, label, creds["user_id"])
-        set_credentials(engine, account.id, creds)
-        action = "configured"
-
-    handle = f"@{creds['username']}" if creds["username"] else creds["user_id"]
-    print(
-        f"Instagram account '{label}' {action} for {handle} "
-        f"— token {describe_expiry(token)}"
-    )
+    account = save_account(engine, NETWORK_INSTAGRAM, label, creds["user_id"], creds, project_id=project_id, sync_role=sync_role)
+    report(f"Configured {account.network}/{account.label} — token {describe_expiry(token)}")
     if not token.renewed:
-        print(
-            "Could not upgrade this token to a long-lived one. Re-run with the App "
-            "Secret if Instagram starts reporting an expired session."
-        )
+        report("Token was not upgraded. Supply the App Secret to exchange a short-lived token.")
     return account
 
 

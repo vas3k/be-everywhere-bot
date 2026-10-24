@@ -24,11 +24,9 @@ from utils.posts import sort_chronologically
 from config import NETWORK_THREADS, THREADS_APP
 from db.accounts import (
     Account,
-    create_account,
-    find_account,
+    save_account,
     get_all_credentials,
     set_credential,
-    set_credentials,
     update_remote_id,
 )
 
@@ -240,11 +238,13 @@ async def _ensure_session(engine: Engine, account_id: int) -> dict[str, str]:
     return creds
 
 
-async def authenticate(engine: Engine, label: str = "default") -> Account:
-    print(AUTH_HELP)
-    access_token = input("Access Token: ").strip()
-    app_secret = input("App Secret (optional, press Enter to skip): ").strip()
-    username = input("Username (optional, press Enter to auto-detect): ").strip().lstrip("@")
+async def authenticate(engine: Engine, label: str = "default", *, project_id: int = 1, sync_role: str | None = None, credentials: dict[str, str] | None = None) -> Account:
+    report = print if credentials is None else logger.info
+    if credentials is None:
+        print(AUTH_HELP)
+    access_token = (credentials.get("access_token", "") if credentials is not None else input("Access Token: ")).strip()
+    app_secret = (credentials.get("app_secret", "") if credentials is not None else input("App Secret (optional, press Enter to skip): ")).strip()
+    username = (credentials.get("username", "") if credentials is not None else input("Username (optional, press Enter to auto-detect): ")).strip().lstrip("@")
 
     if not access_token:
         raise RuntimeError("Access token is required.")
@@ -259,26 +259,10 @@ async def authenticate(engine: Engine, label: str = "default") -> Account:
         "username": username or profile.get("username", ""),
     }
 
-    existing = find_account(engine, NETWORK_THREADS, label)
-    if existing:
-        set_credentials(engine, existing.id, creds)
-        update_remote_id(engine, existing.id, creds["user_id"])
-        action = "updated"
-        account = existing
-    else:
-        account = create_account(engine, NETWORK_THREADS, label, creds["user_id"])
-        set_credentials(engine, account.id, creds)
-        action = "configured"
-
-    print(
-        f"Threads account '{label}' {action} for @{creds['username']} "
-        f"— token {describe_expiry(token)}"
-    )
+    account = save_account(engine, NETWORK_THREADS, label, creds["user_id"], creds, project_id=project_id, sync_role=sync_role)
+    report(f"Configured {account.network}/{account.label} — token {describe_expiry(token)}")
     if not token.renewed:
-        print(
-            "Could not upgrade this token to a long-lived one. Re-run with the App "
-            "Secret if Threads starts reporting an expired session."
-        )
+        report("Token was not upgraded. Supply the App Secret to exchange a short-lived token.")
     return account
 
 

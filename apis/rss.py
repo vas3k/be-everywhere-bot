@@ -14,10 +14,8 @@ from utils.posts import sort_chronologically
 from config import NETWORK_RSS
 from db.accounts import (
     Account,
-    create_account,
-    find_account,
+    save_account,
     get_all_credentials,
-    set_credentials,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,9 +173,11 @@ def _parse_feed(xml_text: str, feed_url: str) -> list[Post]:
     raise RuntimeError(f"Unsupported feed format: {root.tag}")
 
 
-async def authenticate(engine: Engine, label: str = "default") -> Account:
-    print(AUTH_HELP)
-    feed_url = input("Feed URL: ").strip()
+async def authenticate(engine: Engine, label: str = "default", *, project_id: int = 1, sync_role: str | None = None, credentials: dict[str, str] | None = None) -> Account:
+    report = print if credentials is None else logger.info
+    if credentials is None:
+        print(AUTH_HELP)
+    feed_url = (credentials.get("feed_url", "") if credentials is not None else input("Feed URL: ")).strip()
     if not feed_url:
         raise RuntimeError("Feed URL is required.")
 
@@ -189,15 +189,8 @@ async def authenticate(engine: Engine, label: str = "default") -> Account:
     creds = {"feed_url": feed_url}
     remote_id = _stable_post_id(feed_url)
 
-    existing = find_account(engine, NETWORK_RSS, label)
-    if existing:
-        set_credentials(engine, existing.id, creds)
-        print(f"RSS feed '{label}' updated: {feed_url} ({len(posts)} item(s) in feed)")
-        return existing
-
-    account = create_account(engine, NETWORK_RSS, label, remote_id)
-    set_credentials(engine, account.id, creds)
-    print(f"RSS feed '{label}' configured: {feed_url} ({len(posts)} item(s) in feed)")
+    account = save_account(engine, NETWORK_RSS, label, remote_id, creds, project_id=project_id, sync_role=sync_role)
+    report(f"Configured {account.network}/{account.label}")
     return account
 
 

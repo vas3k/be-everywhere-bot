@@ -14,10 +14,8 @@ from utils.posts import sort_chronologically
 from config import NETWORK_TWITTER, TWITTER_APP, TWITTER_FETCH_PAGE_SIZE
 from db.accounts import (
     Account,
-    create_account,
-    find_account,
+    save_account,
     get_all_credentials,
-    set_credentials,
 )
 
 logger = logging.getLogger(__name__)
@@ -276,10 +274,12 @@ async def _upload_media(
     return str(media_id)
 
 
-async def authenticate(engine: Engine, label: str = "default") -> Account:
-    print(AUTH_HELP)
-    bearer_token = input("Bearer Token: ").strip()
-    username = input("Username (without @): ").strip().lstrip("@")
+async def authenticate(engine: Engine, label: str = "default", *, project_id: int = 1, sync_role: str | None = None, credentials: dict[str, str] | None = None) -> Account:
+    report = print if credentials is None else logger.info
+    if credentials is None:
+        print(AUTH_HELP)
+    bearer_token = (credentials.get("bearer_token", "") if credentials is not None else input("Bearer Token: ")).strip()
+    username = (credentials.get("username", "") if credentials is not None else input("Username (without @): ")).strip().lstrip("@")
 
     if not bearer_token or not username:
         raise RuntimeError("Bearer token and username are required.")
@@ -291,15 +291,8 @@ async def authenticate(engine: Engine, label: str = "default") -> Account:
         "username": user["username"],
     }
 
-    existing = find_account(engine, NETWORK_TWITTER, label)
-    if existing:
-        set_credentials(engine, existing.id, creds)
-        print(f"X account '{label}' updated for @{user['username']}")
-        return existing
-
-    account = create_account(engine, NETWORK_TWITTER, label, str(user["id"]))
-    set_credentials(engine, account.id, creds)
-    print(f"X account '{label}' configured for @{user['username']}")
+    account = save_account(engine, NETWORK_TWITTER, label, str(user["id"]), creds, project_id=project_id, sync_role=sync_role)
+    report(f"Configured {account.network}/{account.label}")
     return account
 
 

@@ -1,86 +1,64 @@
-from db.accounts import Account
-from apis.types import MediaItem, OutboundPost, Post
-from config import (
-    NETWORK_INSTAGRAM,
-    NETWORK_LINKEDIN,
-    NETWORK_RSS,
-    NETWORK_TWITTER,
-    SOURCE_ONLY_NETWORKS,
-)
-from sync.engine import (
-    _dest_id_per_source_post,
-    _destination_accounts,
-    _filter_original_posts,
-    _group_by_conversation,
-    _slice_media_bytes,
-)
+import pytest
+from sqlalchemy import event
+
+from apis.types import MediaItem, OutboundPost, PublishResult
+from db.accounts import create_account
+from db.deliveries import Delivery, complete_delivery, create_delivery, load_deliveries, record_delivery_part
+from db.sync_state import get_dest_post_id, get_mirrored_post_ids
 
 
-def test_source_only_networks():
-    assert NETWORK_RSS in SOURCE_ONLY_NETWORKS
-    assert NETWORK_INSTAGRAM in SOURCE_ONLY_NETWORKS
-    assert NETWORK_TWITTER not in SOURCE_ONLY_NETWORKS
-    assert NETWORK_LINKEDIN not in SOURCE_ONLY_NETWORKS
+def test_delivery_round_trip_preserves_content_and_progress(engine):
+    source = create_account(engine, "twitter", "main", "source")
+    dest = create_account(engine, "telegram", "main", "dest")
+    delivery = Delivery(source.id, dest.id, "thread", [
+        OutboundPost("Caption", [MediaItem("tgfile:photo", "photo", "Alt text")], ["1", "2"]),
+        OutboundPost("Tail", source_post_ids=["1", "2"]),
+    ], [], None)
+    create_delivery(engine, delivery)
+    record_delivery_part(engine, delivery, PublishResult("first", "reply-first", ("first", "album-second")))
+
+    restored, = load_deliveries(engine, source.id)
+    assert restored == delivery
+    assert get_mirrored_post_ids(engine, dest.id) == {"first", "album-second"}
+    assert get_dest_post_id(engine, source.id, "1", dest.id) is None
+
+    record_delivery_part(engine, restored, PublishResult("last", "reply-last"))
+    assert complete_delivery(engine, restored) == 2
+    assert get_dest_post_id(engine, source.id, "1", dest.id) == "last"
+    assert get_dest_post_id(engine, source.id, "2", dest.id) == "last"
+    assert load_deliveries(engine, source.id) == []
 
 
-def test_group_by_conversation(post_factory, utc_now):
-    root = post_factory("1", conversation_id="thread")
-    reply = post_factory(
-        "2",
-        conversation_id="thread",
-        in_reply_to_id="1",
-    )
-    groups = _group_by_conversation([reply, root])
-    assert len(groups) == 1
-    assert [p.id for p in groups[0]] == ["1", "2"]
+def test_unfinished_delivery_cannot_be_marked_complete(engine):
+    source = create_account(engine, "twitter", "main", "source")
+    dest = create_account(engine, "telegram", "main", "dest")
+    delivery = Delivery(source.id, dest.id, "thread", [OutboundPost("Text", source_post_ids=["1"])], [], None)
+    create_delivery(engine, delivery)
+
+    with pytest.raises(ValueError):
+        complete_delivery(engine, delivery)
+
+    assert load_deliveries(engine, source.id) == [delivery]
+    assert get_dest_post_id(engine, source.id, "1", dest.id) is None
 
 
-def test_filter_original_posts_skips_mirrored(post_factory):
-    posts = [post_factory("1"), post_factory("2")]
-    filtered = _filter_original_posts(posts, {"2"})
-    assert [p.id for p in filtered] == ["1"]
+def test_checkpoint_and_mirror_markers_commit_together(engine):
+    source = create_account(engine, "twitter", "main", "source")
+    dest = create_account(engine, "telegram", "main", "dest")
+    delivery = Delivery(source.id, dest.id, "thread", [OutboundPost("Text", source_post_ids=["1"])], [], None)
+    create_delivery(engine, delivery)
 
+    def fail_mirror_insert(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO mirrored_posts"):
+            raise RuntimeError("Disk write failed")
 
-def test_filter_original_posts_no_mirrored(post_factory):
-    posts = [post_factory("1")]
-    assert _filter_original_posts(posts, set()) == posts
+    event.listen(engine, "before_cursor_execute", fail_mirror_insert)
+    try:
+        with pytest.raises(RuntimeError):
+            record_delivery_part(engine, delivery, PublishResult("remote", "reply"))
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_mirror_insert)
 
-
-def test_destination_accounts_excludes_self_and_source_only(post_factory):
-    source = Account(id=1, network=NETWORK_TWITTER, label="default", remote_id="1")
-    dest = Account(id=2, network="telegram", label="default", remote_id="2")
-    rss = Account(id=3, network=NETWORK_RSS, label="blog", remote_id="3")
-    instagram = Account(id=4, network=NETWORK_INSTAGRAM, label="main", remote_id="4")
-    linkedin = Account(id=5, network=NETWORK_LINKEDIN, label="main", remote_id="5")
-    result = _destination_accounts(
-        source, [source, dest, rss, instagram, linkedin]
-    )
-    assert result == [dest, linkedin]
-
-
-def test_slice_media_bytes():
-    media_a = MediaItem(url="a", media_type="photo")
-    media_b = MediaItem(url="b", media_type="photo")
-    outbounds = [
-        OutboundPost(text="", media=[media_a, media_b], source_post_ids=["1"]),
-        OutboundPost(text="tail", media=[], source_post_ids=["1"]),
-    ]
-    all_bytes = [b"a", b"b"]
-    assert _slice_media_bytes(outbounds, all_bytes) == [[b"a", b"b"], []]
-
-
-def test_dest_id_per_source_post_maps_merged_thread():
-    outbounds = [
-        OutboundPost(text="merged", media=[], source_post_ids=["a", "b", "c"]),
-    ]
-    mapping = _dest_id_per_source_post(outbounds, ["dest-1"])
-    assert mapping == {"a": "dest-1", "b": "dest-1", "c": "dest-1"}
-
-
-def test_dest_id_per_source_post_multiple_outbounds():
-    outbounds = [
-        OutboundPost(text="1", media=[], source_post_ids=["a"]),
-        OutboundPost(text="2", media=[], source_post_ids=["b"]),
-    ]
-    mapping = _dest_id_per_source_post(outbounds, ["dest-1", "dest-2"])
-    assert mapping == {"a": "dest-1", "b": "dest-2"}
+    assert delivery.dest_ids == []
+    assert load_deliveries(engine, source.id) == [delivery]
+    assert get_mirrored_post_ids(engine, dest.id) == set()

@@ -2,7 +2,6 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy.engine import Engine
@@ -13,10 +12,8 @@ from utils.posts import sort_chronologically
 from config import NETWORK_MASTODON
 from db.accounts import (
     Account,
-    create_account,
-    find_account,
+    save_account,
     get_all_credentials,
-    set_credentials,
 )
 
 logger = logging.getLogger(__name__)
@@ -241,10 +238,12 @@ async def _upload_media(
     return str(media_id)
 
 
-async def authenticate(engine: Engine, label: str = "default") -> Account:
-    print(AUTH_HELP)
-    instance_url = input("Instance URL: ").strip().rstrip("/")
-    access_token = input("Access Token: ").strip()
+async def authenticate(engine: Engine, label: str = "default", *, project_id: int = 1, sync_role: str | None = None, credentials: dict[str, str] | None = None) -> Account:
+    report = print if credentials is None else logger.info
+    if credentials is None:
+        print(AUTH_HELP)
+    instance_url = (credentials.get("instance_url", "") if credentials is not None else input("Instance URL: ")).strip().rstrip("/")
+    access_token = (credentials.get("access_token", "") if credentials is not None else input("Access Token: ")).strip()
 
     if not instance_url or not access_token:
         raise RuntimeError("Instance URL and access token are required.")
@@ -260,7 +259,6 @@ async def authenticate(engine: Engine, label: str = "default") -> Account:
             )
         account_data = response.json()
 
-    host = urlparse(instance_url).hostname or instance_url
     creds = {
         "instance_url": instance_url,
         "access_token": access_token,
@@ -268,23 +266,8 @@ async def authenticate(engine: Engine, label: str = "default") -> Account:
         "account_id": str(account_data["id"]),
     }
 
-    existing = find_account(engine, NETWORK_MASTODON, label)
-    if existing:
-        set_credentials(engine, existing.id, creds)
-        print(
-            f"Mastodon account '{label}' updated for "
-            f"@{account_data['username']}@{host}"
-        )
-        return existing
-
-    account = create_account(
-        engine, NETWORK_MASTODON, label, str(account_data["id"])
-    )
-    set_credentials(engine, account.id, creds)
-    print(
-        f"Mastodon account '{label}' configured for "
-        f"@{account_data['username']}@{host}"
-    )
+    account = save_account(engine, NETWORK_MASTODON, label, str(account_data["id"]), creds, project_id=project_id, sync_role=sync_role)
+    report(f"Configured {account.network}/{account.label}")
     return account
 
 

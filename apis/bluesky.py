@@ -14,10 +14,9 @@ from utils.posts import sort_chronologically
 from config import BLUESKY_APP, NETWORK_BLUESKY
 from db.accounts import (
     Account,
-    create_account,
-    find_account,
-    get_all_credentials,
+    save_account,
     set_credentials,
+    get_all_credentials,
     update_remote_id,
 )
 
@@ -371,11 +370,13 @@ async def _build_embed(
     return None
 
 
-async def authenticate(engine: Engine, label: str = "default") -> Account:
-    print(AUTH_HELP)
-    handle = input("Handle (e.g. user.bsky.social): ").strip().lstrip("@")
-    app_password = input("App Password: ").strip()
-    pds_url = input("PDS URL (optional): ").strip() or BLUESKY_APP.default_pds
+async def authenticate(engine: Engine, label: str = "default", *, project_id: int = 1, sync_role: str | None = None, credentials: dict[str, str] | None = None) -> Account:
+    report = print if credentials is None else logger.info
+    if credentials is None:
+        print(AUTH_HELP)
+    handle = (credentials.get("handle", "") if credentials is not None else input("Handle (e.g. user.bsky.social): ")).strip().lstrip("@")
+    app_password = (credentials.get("app_password", "") if credentials is not None else input("App Password: ")).strip()
+    pds_url = (credentials.get("pds_url", "") if credentials is not None else input("PDS URL (optional): ")).strip() or BLUESKY_APP.default_pds
 
     if not handle or not app_password:
         raise RuntimeError("Handle and app password are required.")
@@ -398,16 +399,8 @@ async def authenticate(engine: Engine, label: str = "default") -> Account:
         "pds_url": pds_url,
     }
 
-    existing = find_account(engine, NETWORK_BLUESKY, label)
-    if existing:
-        set_credentials(engine, existing.id, creds)
-        update_remote_id(engine, existing.id, creds["did"])
-        print(f"Bluesky account '{label}' updated for @{creds['handle']}")
-        return existing
-
-    account = create_account(engine, NETWORK_BLUESKY, label, creds["did"])
-    set_credentials(engine, account.id, creds)
-    print(f"Bluesky account '{label}' configured for @{creds['handle']}")
+    account = save_account(engine, NETWORK_BLUESKY, label, creds["did"], creds, project_id=project_id, sync_role=sync_role)
+    report(f"Configured {account.network}/{account.label}")
     return account
 
 

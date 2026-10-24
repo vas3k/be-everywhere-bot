@@ -46,6 +46,8 @@ NETWORKS: list[str] = [
     NETWORK_LINKEDIN,
 ]
 
+ACCOUNT_SYNC_ROLES = ("source_and_destination", "source_only", "destination_only")
+
 # Read-only sources — mesh sync publishes from these but never to them.
 SOURCE_ONLY_NETWORKS: frozenset[str] = frozenset({NETWORK_RSS, NETWORK_INSTAGRAM})
 
@@ -64,6 +66,7 @@ class NetworkLimits:
     max_caption: int
     max_media_group: int
     allows_mixed_media: bool = True
+    max_videos_per_post: int | None = None
 
 
 @dataclass(frozen=True)
@@ -109,7 +112,8 @@ LINKEDIN_APP = LinkedInAppConfig()
 
 TELEGRAM_LIMITS = NetworkLimits(max_text=4096, max_caption=1024, max_media_group=4)
 MASTODON_LIMITS = NetworkLimits(
-    max_text=500, max_caption=500, max_media_group=4, allows_mixed_media=False
+    max_text=500, max_caption=500, max_media_group=4, allows_mixed_media=False,
+    max_videos_per_post=1,
 )
 
 TWITTER_LIMITS = NetworkLimits(max_text=280, max_caption=280, max_media_group=4)
@@ -118,7 +122,8 @@ THREADS_LIMITS = NetworkLimits(
     max_text=500, max_caption=500, max_media_group=20, allows_mixed_media=False
 )
 BLUESKY_LIMITS = NetworkLimits(
-    max_text=300, max_caption=300, max_media_group=4, allows_mixed_media=False
+    max_text=300, max_caption=300, max_media_group=4, allows_mixed_media=False,
+    max_videos_per_post=1,
 )
 LINKEDIN_LIMITS = NetworkLimits(
     max_text=3000,

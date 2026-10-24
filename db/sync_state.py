@@ -5,6 +5,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from db.schema import account_sync_state, mirrored_posts, sync_mappings
+from db.accounts import get_account, get_all_credentials, list_accounts
+from db.helpers import remote_account_identity
 
 
 def is_synced(
@@ -96,12 +98,23 @@ def record_mirrored_post(
 
 
 def get_mirrored_post_ids(engine: Engine, account_id: int) -> set[str]:
-    stmt = select(mirrored_posts.c.post_id).where(
-        mirrored_posts.c.account_id == account_id
-    )
-    with engine.connect() as conn:
-        rows = conn.execute(stmt).all()
-    return {row[0] for row in rows}
+    account = get_account(engine, account_id)
+    if account is None:
+        return set()
+    peers = []
+    credentials = get_all_credentials(engine, account.id)
+    identity = remote_account_identity(account.network, account.remote_id, credentials)
+    for candidate in list_accounts(engine, account.network, include_removed=True):
+        other = get_all_credentials(engine, candidate.id)
+        if remote_account_identity(candidate.network, candidate.remote_id, other) == identity:
+            peers.append(candidate.id)
+
+    # A remote account can have several project records; bot posts must not bridge them.
+    with engine.connect() as connection:
+        rows = connection.execute(select(mirrored_posts.c.post_id).where(
+            mirrored_posts.c.account_id.in_(peers),
+        )).scalars().all()
+    return set(rows)
 
 
 def get_last_synced_at(engine: Engine, account_id: int) -> datetime | None:
@@ -110,7 +123,7 @@ def get_last_synced_at(engine: Engine, account_id: int) -> datetime | None:
     )
     with engine.connect() as conn:
         row = conn.execute(stmt).first()
-    return row[0] if row else None
+    return row[0].replace(tzinfo=timezone.utc) if row and row[0] else None
 
 
 def set_last_synced_at(
@@ -131,3 +144,13 @@ def set_last_synced_at(
                 .where(account_sync_state.c.account_id == account_id)
                 .values(last_synced_at=synced_at)
             )
+
+
+def get_sync_mappings(engine: Engine, source_account_id: int) -> dict[tuple[str, int], str]:
+    with engine.connect() as connection:
+        rows = connection.execute(select(
+            sync_mappings.c.source_post_id,
+            sync_mappings.c.dest_account_id,
+            sync_mappings.c.dest_post_id,
+        ).where(sync_mappings.c.source_account_id == source_account_id)).all()
+    return {(post_id, dest_id): remote_id for post_id, dest_id, remote_id in rows}

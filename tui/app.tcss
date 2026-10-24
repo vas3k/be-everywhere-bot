@@ -1,0 +1,121 @@
+Screen {
+    background: $background;
+}
+#body {
+    height: 1fr;
+    padding: 1 2;
+}
+.title {
+    color: $accent;
+    text-style: bold;
+    height: auto;
+    margin-bottom: 1;
+}
+.muted {
+    color: $text-muted;
+    height: auto;
+    margin-bottom: 1;
+}
+#cards {
+    height: auto;
+    grid-size: 1;
+    grid-rows: 9;
+    grid-gutter: 1 2;
+    margin-bottom: 1;
+}
+.project-card {
+    width: 1fr;
+    height: 9;
+    content-align: left middle;
+    padding: 0 2;
+    border: round $primary;
+    background: $surface;
+}
+.project-card:hover, .project-card:focus {
+    border: round $accent;
+    background: $primary 20%;
+}
+.actions {
+    grid-size: 2;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+    height: auto;
+    margin: 1 0;
+}
+.actions Button, .dialog-actions Button {
+    width: 1fr;
+    min-width: 0;
+}
+.summary, #account-detail {
+    height: auto;
+    padding: 1;
+    background: $surface;
+}
+#accounts {
+    margin-bottom: 1;
+}
+#status {
+    height: 1;
+    color: $text-muted;
+    padding: 0 1;
+}
+Editor, TaskLog {
+    align: center middle;
+    background: $background 75%;
+}
+#dialog {
+    width: 76;
+    max-width: 95%;
+    height: 95%;
+    padding: 1 2;
+    border: round $accent;
+    background: $surface;
+}
+#fields {
+    height: 1fr;
+}
+#fields Label {
+    margin-top: 1;
+    height: auto;
+}
+#credentials {
+    height: auto;
+}
+.dialog-actions {
+    grid-size: 2;
+    grid-gutter: 1;
+    height: 3;
+    margin-top: 1;
+}
+#form-error {
+    height: auto;
+    color: $error;
+}
+#task-dialog {
+    width: 95%;
+    height: 95%;
+    padding: 1 2;
+    border: round $accent;
+    background: $surface;
+}
+#task-log {
+    height: 1fr;
+    border: round $primary-muted;
+    padding: 0 1;
+}
+#task-status {
+    height: auto;
+    margin: 1 0;
+}
+#close-task {
+    width: 100%;
+}
+
+#recent-history {
+    height: 22;
+    min-height: 10;
+    border: round $primary-muted;
+    background: $surface;
+    padding: 0 1;
+    margin-top: 1;
+}

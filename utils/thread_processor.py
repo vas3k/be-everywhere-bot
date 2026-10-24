@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
-from apis.types import MediaItem, OutboundPost, Post
+from apis.types import OutboundPost, Post
 from config import NETWORK_LIMITS, NetworkLimits, TELEGRAM_LIMITS
 from utils.posts import sort_chronologically
 
@@ -11,14 +11,6 @@ from utils.posts import sort_chronologically
 def is_old_enough(post: Post, min_age_minutes: int) -> bool:
     age = datetime.now(timezone.utc) - post.created_at.astimezone(timezone.utc)
     return age >= timedelta(minutes=min_age_minutes)
-
-
-def _thread_root(thread: list[Post]) -> Post | None:
-    """Starting post of a conversation (explicit root, else chronological first)."""
-    if not thread:
-        return None
-    ordered = sort_chronologically(thread)
-    return next((p for p in ordered if p.is_thread_root), ordered[0])
 
 
 def collect_ready_batch(
@@ -36,7 +28,7 @@ def collect_ready_batch(
     the root rather than waiting for each reply to age independently.
     """
     ordered = sort_chronologically(thread)
-    root = _thread_root(ordered)
+    root = next((post for post in ordered if post.is_thread_root), ordered[0] if ordered else None)
     batch: list[Post] = []
     for post in ordered:
         if is_synced(post.id):
@@ -54,14 +46,6 @@ def collect_ready_batch(
 
 LINE_SEPARATORS = ("\n\n", "\n")
 SENTENCE_SEPARATORS = (". ", "! ", "? ")
-
-
-def _split_at_separator(window: str, separators: tuple[str, ...]) -> int:
-    for sep in separators:
-        idx = window.rfind(sep)
-        if idx > 0:
-            return idx + len(sep)
-    return 0
 
 
 def split_text(text: str, max_len: int) -> list[str]:
@@ -86,9 +70,12 @@ def split_text(text: str, max_len: int) -> list[str]:
             break
 
         window = remaining[:max_len]
-        split_at = _split_at_separator(window, LINE_SEPARATORS)
-        if split_at <= 0:
-            split_at = _split_at_separator(window, SENTENCE_SEPARATORS)
+        split_at = 0
+        for separator in (*LINE_SEPARATORS, *SENTENCE_SEPARATORS):
+            index = window.rfind(separator)
+            if index > 0:
+                split_at = index + len(separator)
+                break
         if split_at <= 0:
             idx = window.rfind(" ")
             if idx > 0:
@@ -104,129 +91,39 @@ def split_text(text: str, max_len: int) -> list[str]:
     return chunks
 
 
-def _chunk(items: list[MediaItem], size: int) -> list[list[MediaItem]]:
-    return [items[i : i + size] for i in range(0, len(items), size)]
-
-
-def _merge_thread_posts(posts: list[Post]) -> Post:
-    """Combine thread parts into one logical post (text + media in order)."""
-    ordered = sort_chronologically(posts)
-    first = ordered[0]
-    texts = [(post.text or "").strip() for post in ordered]
-    combined_text = "\n\n".join(text for text in texts if text)
-    combined_media = [item for post in ordered for item in post.media]
-    return Post(
-        id=first.id,
-        text=combined_text,
-        created_at=first.created_at,
-        conversation_id=first.conversation_id,
-        author_id=first.author_id,
-        media=combined_media,
-        in_reply_to_id=first.in_reply_to_id,
-        in_reply_to_user_id=first.in_reply_to_user_id,
-        is_thread_root=first.is_thread_root,
-    )
-
-
-def _outbound_for_single_post(
-    post: Post,
-    limits: NetworkLimits,
-    *,
-    source_post_ids: list[str] | None = None,
-) -> list[OutboundPost]:
-    source_ids = source_post_ids or [post.id]
-    text = (post.text or "").strip()
-    media = list(post.media)
-
-    if not media:
-        if not text:
-            return []
-        return [
-            OutboundPost(text=chunk, source_post_ids=source_ids)
-            for chunk in split_text(text, limits.max_text)
-        ]
-
-    if not limits.allows_mixed_media:
-        photos = [item for item in media if item.media_type == "photo"]
-        videos = [
-            item for item in media if item.media_type in ("video", "animated_gif")
-        ]
-        if photos and videos:
-            out: list[OutboundPost] = []
-            photo_post = Post(
-                id=post.id,
-                text=post.text,
-                created_at=post.created_at,
-                conversation_id=post.conversation_id,
-                author_id=post.author_id,
-                media=photos,
-                in_reply_to_id=post.in_reply_to_id,
-                in_reply_to_user_id=post.in_reply_to_user_id,
-                is_thread_root=post.is_thread_root,
-            )
-            video_post = Post(
-                id=post.id,
-                text="",
-                created_at=post.created_at,
-                conversation_id=post.conversation_id,
-                author_id=post.author_id,
-                media=videos,
-                in_reply_to_id=post.in_reply_to_id,
-                in_reply_to_user_id=post.in_reply_to_user_id,
-                is_thread_root=post.is_thread_root,
-            )
-            out.extend(
-                _outbound_for_single_post(
-                    photo_post, limits, source_post_ids=source_ids
-                )
-            )
-            out.extend(
-                _outbound_for_single_post(
-                    video_post, limits, source_post_ids=source_ids
-                )
-            )
-            return out
-
-    out: list[OutboundPost] = []
-    text_remaining = text
-
-    for batch in _chunk(media, limits.max_media_group):
-        caption = ""
-        if text_remaining:
-            if len(text_remaining) <= limits.max_caption:
-                caption, text_remaining = text_remaining, ""
-            else:
-                parts = split_text(text_remaining, limits.max_caption)
-                caption = parts[0]
-                text_remaining = (
-                    "\n\n".join(parts[1:]).strip() if len(parts) > 1 else ""
-                )
-        out.append(
-            OutboundPost(text=caption, media=batch, source_post_ids=source_ids)
-        )
-
-    for chunk in split_text(text_remaining, limits.max_text):
-        out.append(OutboundPost(text=chunk, source_post_ids=source_ids))
-
-    return out
-
-
 def build_outbound_posts(
-    posts: list[Post],
-    limits: NetworkLimits | None = None,
+    posts: list[Post], limits: NetworkLimits | None = None,
 ) -> list[OutboundPost]:
-    """Split source posts into ordered outbound messages sized for destination limits."""
     if not posts:
         return []
-
     limits = limits or TELEGRAM_LIMITS
-    ordered = sort_chronologically(posts)
-    if len(ordered) == 1:
-        return _outbound_for_single_post(ordered[0], limits)
+    if min(limits.max_text, limits.max_caption, limits.max_media_group) <= 0:
+        raise ValueError("Destination limits must be positive")
 
-    merged = _merge_thread_posts(ordered)
+    ordered = sort_chronologically(posts)
     source_ids = [post.id for post in ordered]
-    return _outbound_for_single_post(merged, limits, source_post_ids=source_ids)
+    remaining = "\n\n".join(post.text.strip() for post in ordered if post.text.strip())
+    media = [item for post in ordered for item in post.media]
+    groups = [media]
+    if not limits.allows_mixed_media:
+        groups = [
+            [item for item in media if item.media_type == "photo"],
+            [item for item in media if item.media_type != "photo"],
+        ]
+
+    outbounds = []
+    for group in groups:
+        group_size = limits.max_media_group
+        if group and group[0].media_type != "photo" and limits.max_videos_per_post is not None:
+            group_size = min(group_size, limits.max_videos_per_post)
+        for offset in range(0, len(group), group_size):
+            attachments = group[offset:offset + group_size]
+            caption = split_text(remaining, limits.max_caption)[0] if remaining else ""
+            remaining = remaining[len(caption):].lstrip()
+            outbounds.append(OutboundPost(caption, attachments, source_ids))
+    for text in split_text(remaining, limits.max_text):
+        outbounds.append(OutboundPost(text=text, source_post_ids=source_ids))
+    return outbounds
 
 
 def get_network_limits(network: str) -> NetworkLimits:

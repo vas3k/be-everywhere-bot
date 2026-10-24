@@ -1,259 +1,37 @@
 import asyncio
 import logging
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from types import ModuleType
 
+from sqlalchemy import update
 from sqlalchemy.engine import Engine
 
-import apis.bluesky as bluesky
-import apis.linkedin as linkedin
-import apis.instagram as instagram
-import apis.mastodon as mastodon
-import apis.rss as rss
-import apis.telegram as telegram
-import apis.threads as threads
-import apis.twitter as twitter
-from apis.types import OutboundPost, Post
-from utils.urls import unwrap_posts_text
+from apis.registry import NETWORK_APIS
+from apis.types import Post
 from config import (
-    BACKFILL_POST_DELAY_SECONDS,
-    NETWORK_BLUESKY,
-    NETWORK_INSTAGRAM,
-    NETWORK_LINKEDIN,
-    NETWORK_MASTODON,
-    NETWORK_RSS,
-    NETWORK_TELEGRAM,
-    NETWORK_THREADS,
-    NETWORK_TWITTER,
-    POST_MIN_AGE_MINUTES,
+    NETWORK_LIMITS,
     REPLY_FILTER_NETWORKS,
     SOURCE_ONLY_NETWORKS,
-    WATCH_INITIAL_LOOKBACK_HOURS,
     TWITTER_FETCH_MAX_PAGES,
-    WATCH_OVERLAP_HOURS,
 )
-from db.accounts import Account, account_display_name, list_accounts
+from db.accounts import Account, account_display_name, get_account, get_all_credentials, list_accounts
+from db.helpers import validate_account_role
+from db.projects import get_project, list_projects
+from db.schema import projects
+from db.deliveries import (
+    Delivery, complete_delivery, create_delivery, load_deliveries, record_delivery_part,
+)
+from db.posts import discard_posts, load_posts, save_posts
 from db.sync_state import (
-    get_dest_post_id,
-    get_last_synced_at,
-    get_mirrored_post_ids,
-    is_synced,
-    mark_synced,
-    record_mirrored_post,
-    set_last_synced_at,
+    get_last_synced_at, get_mirrored_post_ids, get_sync_mappings, set_last_synced_at,
 )
 from utils.filters import exclude_source_only_posts, filter_own_threads
 from utils.posts import sort_chronologically
-from utils.thread_processor import (
-    build_outbound_posts,
-    collect_ready_batch,
-    get_network_limits,
-)
+from utils.thread_processor import build_outbound_posts, collect_ready_batch
+from utils.urls import unwrap_posts_text
 
 logger = logging.getLogger(__name__)
-
-_NETWORKS: dict[str, ModuleType] = {
-    NETWORK_TWITTER: twitter,
-    NETWORK_TELEGRAM: telegram,
-    NETWORK_MASTODON: mastodon,
-    NETWORK_THREADS: threads,
-    NETWORK_BLUESKY: bluesky,
-    NETWORK_RSS: rss,
-    NETWORK_INSTAGRAM: instagram,
-    NETWORK_LINKEDIN: linkedin,
-}
-
-
-def _api(network: str) -> ModuleType:
-    try:
-        return _NETWORKS[network]
-    except KeyError as exc:
-        raise ValueError(f"Unknown network: {network}") from exc
-
-
-def _fetch_since(
-    engine: Engine,
-    account: Account,
-    since: datetime | None,
-) -> datetime | None:
-    if since is not None:
-        return since
-    now = datetime.now(timezone.utc)
-    last_sync = get_last_synced_at(engine, account.id)
-    if last_sync:
-        return last_sync - timedelta(hours=WATCH_OVERLAP_HOURS)
-    return now - timedelta(hours=WATCH_INITIAL_LOOKBACK_HOURS)
-
-
-def _group_by_conversation(posts: list[Post]) -> list[list[Post]]:
-    groups: dict[str, list[Post]] = defaultdict(list)
-    for post in posts:
-        groups[post.conversation_id].append(post)
-    return [sort_chronologically(group) for group in groups.values()]
-
-
-def _filter_original_posts(posts: list[Post], mirrored_ids: set[str]) -> list[Post]:
-    if not mirrored_ids:
-        return posts
-    filtered = [p for p in posts if p.id not in mirrored_ids]
-    skipped = len(posts) - len(filtered)
-    if skipped:
-        logger.info("Skipped %d mirrored post(s) created by sync", skipped)
-    return filtered
-
-
-def _destination_accounts(source: Account, all_accounts: list[Account]) -> list[Account]:
-    return [
-        account
-        for account in all_accounts
-        if account.id != source.id and account.network not in SOURCE_ONLY_NETWORKS
-    ]
-
-
-async def _download_media_flat(
-    engine: Engine, source: Account, posts: list[Post]
-) -> list[bytes]:
-    api = _api(source.network)
-    return [
-        await api.download_media(item, engine, source.id)
-        for post in posts
-        for item in post.media
-    ]
-
-
-def _slice_media_bytes(
-    outbounds: list[OutboundPost], all_bytes: list[bytes]
-) -> list[list[bytes]]:
-    offset = 0
-    sliced: list[list[bytes]] = []
-    for outbound in outbounds:
-        n = len(outbound.media)
-        sliced.append(all_bytes[offset : offset + n])
-        offset += n
-    return sliced
-
-
-def _dest_id_per_source_post(
-    outbounds: list[OutboundPost], dest_ids: list[str]
-) -> dict[str, str]:
-    """Map each source post id to the last dest id published for it."""
-    mapping: dict[str, str] = {}
-    for outbound, dest_id in zip(outbounds, dest_ids):
-        for source_id in outbound.source_post_ids:
-            mapping[source_id] = dest_id
-    return mapping
-
-
-async def _chain_anchor(
-    engine: Engine,
-    source: Account,
-    dest: Account,
-    thread: list[Post],
-    batch: list[Post],
-) -> str | None:
-    """Reply ref when this batch continues a partially synced conversation."""
-    if not batch:
-        return None
-
-    ordered = sort_chronologically(thread)
-    first_id = batch[0].id
-    idx = next((i for i, post in enumerate(ordered) if post.id == first_id), -1)
-    if idx <= 0:
-        return None
-
-    prev_post = ordered[idx - 1]
-    if not is_synced(engine, source.id, prev_post.id, dest.id):
-        return None
-
-    dest_post_id = get_dest_post_id(engine, source.id, prev_post.id, dest.id)
-    if not dest_post_id:
-        return None
-
-    if dest.network == NETWORK_BLUESKY:
-        return await bluesky.resolve_reply_target(engine, dest.id, dest_post_id)
-
-    return dest_post_id
-
-
-async def _publish_batch(
-    engine: Engine,
-    source: Account,
-    dest: Account,
-    batch: list[Post],
-    thread: list[Post],
-    post_delay_seconds: float,
-) -> tuple[list[str], list[OutboundPost]]:
-    """Publish one batch to a destination account. Returns created post IDs."""
-    api = _api(dest.network)
-    limits = get_network_limits(dest.network)
-    await unwrap_posts_text(batch)
-
-    if source.network == NETWORK_INSTAGRAM:
-        outbounds = instagram.build_outbounds(batch, limits)
-    else:
-        outbounds = build_outbound_posts(batch, limits)
-    if len(outbounds) > 1:
-        logger.info(
-            "[%s -> %s] Publishing %d message(s) in order",
-            account_display_name(source, engine),
-            account_display_name(dest, engine),
-            len(outbounds),
-        )
-
-    if dest.network == NETWORK_THREADS:
-        media_slices: list[list[bytes]] = [[] for _ in outbounds]
-    else:
-        all_bytes = await _download_media_flat(engine, source, batch)
-        media_slices = _slice_media_bytes(outbounds, all_bytes)
-
-    reply_to = await _chain_anchor(engine, source, dest, thread, batch)
-
-    dest_ids: list[str] = []
-    for i, (outbound, bytes_chunk) in enumerate(zip(outbounds, media_slices)):
-        result = await api.publish_outbound(
-            engine,
-            dest.id,
-            outbound,
-            bytes_chunk,
-            reply_to=reply_to,
-        )
-        dest_ids.append(result.post_id)
-        reply_to = result.reply_ref
-        if post_delay_seconds > 0 and i < len(outbounds) - 1:
-            await asyncio.sleep(post_delay_seconds)
-    return dest_ids, outbounds
-
-
-def _record_success(
-    engine: Engine,
-    source: Account,
-    dest: Account,
-    batch: list[Post],
-    outbounds: list[OutboundPost],
-    dest_ids: list[str],
-) -> int:
-    """Record sync mappings and mirrored posts. Returns count of new mappings."""
-    if not dest_ids:
-        return 0
-
-    per_post_dest = _dest_id_per_source_post(outbounds, dest_ids)
-    recorded = 0
-    for post in batch:
-        dest_post_id = per_post_dest.get(post.id, dest_ids[-1])
-        if mark_synced(
-            engine,
-            source_account_id=source.id,
-            source_post_id=post.id,
-            dest_account_id=dest.id,
-            dest_post_id=dest_post_id,
-        ):
-            recorded += 1
-
-    for dest_id in dest_ids:
-        record_mirrored_post(engine, dest.id, dest_id)
-
-    return recorded
 
 
 async def sync_account(
@@ -262,132 +40,158 @@ async def sync_account(
     all_accounts: list[Account],
     since: datetime | None = None,
     enforce_min_age: bool = True,
-    min_age_minutes: int = POST_MIN_AGE_MINUTES,
+    min_age_minutes: int | None = None,
     post_delay_seconds: float = 0,
+    errors: list[str] | None = None,
 ) -> int:
-    dest_accounts = _destination_accounts(source, all_accounts)
-    if not dest_accounts:
-        logger.info(
-            "[%s] No publishable accounts configured — nothing to sync",
-            account_display_name(source, engine),
+    source = get_account(engine, source.id)
+    if source is None or source.sync_role == "destination_only":
+        return 0
+    with engine.connect() as connection:
+        validate_account_role(
+            connection, source.network, source.project_id, source.remote_id,
+            source.sync_role, get_all_credentials(engine, source.id),
         )
+    project = get_project(engine, source.project_id)
+    if not project.enabled:
+        return 0
+    if min_age_minutes is None:
+        min_age_minutes = project.min_age_minutes
+    errors = errors if errors is not None else []
+
+    destinations = [
+        account for account in all_accounts
+        if account.project_id == source.project_id
+        and account.id != source.id and account.sync_role in ("source_and_destination", "destination_only")
+    ]
+    if not destinations:
         return 0
 
-    fetch_since = _fetch_since(engine, source, since)
-    max_pages = (
-        None
-        if since is not None or source.network in (NETWORK_RSS, NETWORK_INSTAGRAM)
-        else TWITTER_FETCH_MAX_PAGES
-    )
+    api = NETWORK_APIS[source.network]
     source_name = account_display_name(source, engine)
-
-    if max_pages and source.network not in (NETWORK_RSS, NETWORK_INSTAGRAM):
-        logger.info(
-            "[%s] Fetching posts since %s (max %d API page(s))",
-            source_name,
-            fetch_since.strftime("%Y-%m-%d %H:%M UTC") if fetch_since else "all",
-            max_pages,
-        )
-    elif since is not None:
-        logger.info(
-            "[%s] Backfill: fetching posts since %s",
-            source_name,
-            fetch_since.strftime("%Y-%m-%d %H:%M UTC") if fetch_since else "all",
-        )
-    else:
-        logger.info(
-            "[%s] Fetching posts since %s",
-            source_name,
-            fetch_since.strftime("%Y-%m-%d %H:%M UTC") if fetch_since else "all",
-        )
+    started_at = datetime.now(timezone.utc)
+    last_sync = get_last_synced_at(engine, source.id)
+    fetch_since = since or (
+        last_sync - timedelta(hours=project.overlap_hours)
+        if last_sync else started_at - timedelta(hours=project.initial_lookback_hours)
+    )
+    max_pages = None if since or source.network in SOURCE_ONLY_NETWORKS else TWITTER_FETCH_MAX_PAGES
 
     try:
-        posts = await _api(source.network).fetch_posts(
-            engine,
-            source.id,
-            since=fetch_since,
-            include_replies=True,
-            max_pages=max_pages,
+        fetched = await api.fetch_posts(
+            engine, source.id, since=fetch_since, include_replies=True, max_pages=max_pages,
         )
+        with engine.begin() as connection:
+            save_posts(connection, source.id, fetched)
+        set_last_synced_at(engine, source.id, started_at)
     except Exception:
-        logger.exception(
-            "[%s] Fetch failed — skipping until next cycle",
-            source_name,
-        )
+        errors.append(f"fetch:{source.id}")
+        logger.exception("[%s] Fetch failed; processing saved posts", source_name)
+
+    # Fetch can resolve a legacy remote identity; check isolation again before delivery.
+    source = get_account(engine, source.id)
+    if source is None or source.sync_role == "destination_only":
         return 0
-    mirrored_ids = get_mirrored_post_ids(engine, source.id)
-    posts = _filter_original_posts(posts, mirrored_ids)
+    with engine.connect() as connection:
+        validate_account_role(
+            connection, source.network, source.project_id, source.remote_id,
+            source.sync_role, get_all_credentials(engine, source.id),
+        )
+    cached = load_posts(engine, source.id)
+    mirrored = get_mirrored_post_ids(engine, source.id)
+    originals = [post for post in cached if post.id not in mirrored]
+    posts = exclude_source_only_posts(originals)
     if source.network in REPLY_FILTER_NETWORKS:
         posts = filter_own_threads(posts)
-    posts = exclude_source_only_posts(posts)
+    if since:
+        posts = [post for post in posts if post.created_at >= since]
 
-    pending = sum(
-        1
-        for p in posts
-        if any(
-            not is_synced(engine, source.id, p.id, dest.id)
-            for dest in dest_accounts
-        )
-    )
-    logger.info(
-        "[%s] Eligible: %d post(s), pending sync to at least one account: %d",
-        source_name,
-        len(posts),
-        pending,
-    )
+    conversations: dict[str, list[Post]] = defaultdict(list)
+    for post in sort_chronologically(posts):
+        conversations[post.conversation_id].append(post)
 
-    if pending == 0:
-        set_last_synced_at(engine, source.id, datetime.now(timezone.utc))
-        return 0
+    mappings = get_sync_mappings(engine, source.id)
+    pending = {
+        (delivery.conversation_id, delivery.dest_account_id): delivery
+        for delivery in load_deliveries(engine, source.id)
+    }
+    # Saved batches remain publishable even when the source stops returning their posts.
+    for conversation_id, dest_id in pending:
+        conversations.setdefault(conversation_id, [])
 
     synced = 0
-
-    for thread in _group_by_conversation(posts):
-        for dest in dest_accounts:
-            dest_name = account_display_name(dest, engine)
-            batch = collect_ready_batch(
-                thread,
-                is_synced=lambda pid, d=dest: is_synced(
-                    engine, source.id, pid, d.id
-                ),
-                enforce_min_age=enforce_min_age,
-                min_age_minutes=min_age_minutes,
-            )
-            if not batch:
-                continue
-
-            post_ids = ", ".join(p.id for p in batch)
+    for conversation_id, thread in conversations.items():
+        for dest in destinations:
+            delivery = pending.get((conversation_id, dest.id))
             try:
-                dest_ids, outbounds = await _publish_batch(
-                    engine, source, dest, batch, thread, post_delay_seconds
-                )
+                if delivery is None:
+                    batch = collect_ready_batch(
+                        thread,
+                        is_synced=lambda post_id: (post_id, dest.id) in mappings,
+                        enforce_min_age=enforce_min_age,
+                        min_age_minutes=min_age_minutes,
+                    )
+                    if not batch:
+                        continue
+
+                    # URL expansion must not mutate shared source content or the inbox.
+                    batch = [replace(post) for post in batch]
+                    await unwrap_posts_text(batch)
+                    limits = NETWORK_LIMITS[dest.network]
+                    outbounds = (
+                        NETWORK_APIS["instagram"].build_outbounds(batch, limits)
+                        if source.network == "instagram" else build_outbound_posts(batch, limits)
+                    )
+                    if not outbounds:
+                        continue
+
+                    reply_ref = None
+                    first_index = next(i for i, post in enumerate(thread) if post.id == batch[0].id)
+                    if first_index:
+                        reply_ref = mappings.get((thread[first_index - 1].id, dest.id))
+                        if reply_ref and dest.network == "bluesky":
+                            reply_ref = await NETWORK_APIS["bluesky"].resolve_reply_target(
+                                engine, dest.id, reply_ref,
+                            )
+                    delivery = Delivery(source.id, dest.id, conversation_id, outbounds, [], reply_ref)
+                    create_delivery(engine, delivery)
+
+                for outbound in delivery.outbounds[len(delivery.dest_ids):]:
+                    media_bytes = []
+                    if dest.network != "threads":
+                        for media in outbound.media:
+                            media_bytes.append(await api.download_media(media, engine, source.id))
+                    result = await NETWORK_APIS[dest.network].publish_outbound(
+                        engine, dest.id, outbound, media_bytes, reply_to=delivery.reply_ref,
+                    )
+                    record_delivery_part(engine, delivery, result)
+                    if post_delay_seconds:
+                        await asyncio.sleep(post_delay_seconds)
+
+                synced += complete_delivery(engine, delivery)
+                pending.pop((conversation_id, dest.id), None)
+                for outbound, dest_id in zip(delivery.outbounds, delivery.dest_ids):
+                    for post_id in outbound.source_post_ids:
+                        mappings[post_id, dest.id] = dest_id
             except Exception:
+                errors.append(f"delivery:{source.id}:{dest.id}")
                 logger.exception(
-                    "[%s -> %s] Publish failed for post(s) %s — will retry later",
-                    source_name,
-                    dest_name,
-                    post_ids,
+                    "[%s -> %s] Delivery failed; saved progress will be retried",
+                    source_name, account_display_name(dest, engine),
                 )
-                if post_delay_seconds > 0:
-                    await asyncio.sleep(post_delay_seconds)
-                continue
 
-            recorded = _record_success(
-                engine, source, dest, batch, outbounds, dest_ids
-            )
-            synced += recorded
-            logger.info(
-                "[%s -> %s] Synced post(s) %s -> %s",
-                source_name,
-                dest_name,
-                post_ids,
-                ", ".join(dest_ids),
-            )
-
-            if post_delay_seconds > 0:
-                await asyncio.sleep(post_delay_seconds)
-
-    set_last_synced_at(engine, source.id, datetime.now(timezone.utc))
+    # Keep incomplete threads and recent parents; retire old, fully delivered content.
+    discard = []
+    eligible_ids = {post.id for post in posts}
+    for post in cached:
+        if post.id in mirrored or (post.id not in eligible_ids and post.created_at < fetch_since and not since):
+            discard.append(post.id)
+    for conversation_id, thread in conversations.items():
+        if not thread or any(post.created_at >= fetch_since for post in thread):
+            continue
+        if all((post.id, dest.id) in mappings for post in thread for dest in destinations):
+            discard.extend(post.id for post in thread)
+    discard_posts(engine, source.id, discard)
     return synced
 
 
@@ -395,35 +199,64 @@ async def run_sync(
     engine: Engine,
     since: datetime | None = None,
     enforce_min_age: bool = True,
+    *, project_id: int | None = None, account_id: int | None = None,
 ) -> int:
-    accounts = list_accounts(engine)
-    if not accounts:
-        logger.warning(
-            "No accounts configured. Run --auth for at least one network."
-        )
-        return 0
-
-    # Delay only for explicit --since backfills, not when min-age is off
-    # on the first watch cycle after start/restart.
-    post_delay = BACKFILL_POST_DELAY_SECONDS if since is not None else 0
-    if post_delay:
-        logger.info("Backfill mode: %.1fs delay between posts", post_delay)
-
+    if account_id is not None:
+        account = get_account(engine, account_id)
+        if account is None or account.sync_role == "destination_only":
+            raise ValueError("Select a source-enabled connection")
+        if project_id is not None and account.project_id != project_id:
+            raise ValueError("Connection belongs to another project")
+        project_id = account.project_id
+    selected = [get_project(engine, project_id)] if project_id is not None else list_projects(engine)
     total = 0
-    for source in accounts:
-        source_name = account_display_name(source, engine)
-        try:
-            total += await sync_account(
-                engine,
-                source,
-                accounts,
-                since=since,
-                enforce_min_age=enforce_min_age,
-                post_delay_seconds=post_delay,
-            )
-        except Exception:
-            logger.exception(
-                "[%s] Sync failed — continuing with other accounts",
-                source_name,
-            )
+    for project in selected:
+        if not project.enabled:
+            continue
+        started_at = datetime.now(timezone.utc)
+        with engine.begin() as connection:
+            connection.execute(update(projects).where(projects.c.id == project.id).values(
+                last_sync_started_at=started_at, last_sync_finished_at=None,
+                last_sync_count=0, last_sync_error_count=0,
+            ))
+
+        accounts = []
+        count = 0
+        errors = []
+        for account in list_accounts(engine, project_id=project.id):
+            try:
+                with engine.connect() as connection:
+                    validate_account_role(
+                        connection, account.network, account.project_id, account.remote_id,
+                        account.sync_role, get_all_credentials(engine, account.id),
+                        allow_destination_only=True,
+                    )
+                accounts.append(account)
+            except ValueError as exc:
+                errors.append(f"configuration:{account.id}")
+                logger.error("[%s / %s] %s", project.name, account.label, exc)
+        for source in accounts:
+            if source.sync_role == "destination_only" or (account_id is not None and source.id != account_id):
+                continue
+            try:
+                count += await sync_account(
+                    engine, source, accounts, since=since,
+                    enforce_min_age=enforce_min_age and since is None,
+                    post_delay_seconds=project.backfill_delay_seconds if since else 0,
+                    errors=errors,
+                )
+            except Exception:
+                errors.append(f"source:{source.id}")
+                logger.exception("[%s / %s] Sync failed", project.name, account_display_name(source, engine))
+
+        finished_at = datetime.now(timezone.utc)
+        values = {
+            "last_sync_finished_at": finished_at,
+            "last_sync_count": count, "last_sync_error_count": len(errors),
+        }
+        if not errors:
+            values["last_synced_at"] = finished_at
+        with engine.begin() as connection:
+            connection.execute(update(projects).where(projects.c.id == project.id).values(**values))
+        total += count
     return total
