@@ -22,6 +22,7 @@ class Post:
     in_reply_to_id: str | None = None
     in_reply_to_user_id: str | None = None
     is_thread_root: bool = False
+    is_bot_created: bool = False
 
 
 @dataclass

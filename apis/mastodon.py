@@ -9,7 +9,7 @@ from sqlalchemy.engine import Engine
 from apis.types import MediaItem, OutboundPost, Post, PublishResult
 from utils.media import ensure_not_mixed, partition_photos_and_videos
 from utils.posts import sort_chronologically
-from config import NETWORK_MASTODON
+from config import MASTODON_BOT_APP_NAMES, NETWORK_MASTODON
 from db.accounts import (
     Account,
     save_account,
@@ -111,6 +111,7 @@ def _status_to_post(status: dict[str, Any], author_id: str) -> Post | None:
         if status.get("in_reply_to_account_id")
         else None,
         is_thread_root=conversation_id == status_id,
+        is_bot_created=str((status.get("application") or {}).get("name") or "").strip().casefold() in MASTODON_BOT_APP_NAMES,
     )
 
 
@@ -142,6 +143,7 @@ def _normalize_thread_roots(posts: list[Post]) -> list[Post]:
                 in_reply_to_id=post.in_reply_to_id,
                 in_reply_to_user_id=post.in_reply_to_user_id,
                 is_thread_root=post.id == root_id,
+                is_bot_created=post.is_bot_created,
             )
         )
     return normalized

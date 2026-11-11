@@ -24,7 +24,7 @@ from db.deliveries import (
 )
 from db.posts import discard_posts, load_posts, save_posts
 from db.sync_state import (
-    get_last_synced_at, get_mirrored_post_ids, get_sync_mappings, set_last_synced_at,
+    get_last_synced_at, get_mirrored_post_ids, get_sync_mappings, record_mirrored_post, set_last_synced_at,
 )
 from utils.filters import exclude_source_only_posts, filter_own_threads
 from utils.posts import sort_chronologically
@@ -43,6 +43,7 @@ async def sync_account(
     min_age_minutes: int | None = None,
     post_delay_seconds: float = 0,
     errors: list[str] | None = None,
+    dry_run: bool = False,
 ) -> int:
     source = get_account(engine, source.id)
     if source is None or source.sync_role == "destination_only":
@@ -77,16 +78,19 @@ async def sync_account(
     )
     max_pages = None if since or source.network in SOURCE_ONLY_NETWORKS else TWITTER_FETCH_MAX_PAGES
 
-    try:
-        fetched = await api.fetch_posts(
-            engine, source.id, since=fetch_since, include_replies=True, max_pages=max_pages,
-        )
-        with engine.begin() as connection:
-            save_posts(connection, source.id, fetched)
-        set_last_synced_at(engine, source.id, started_at)
-    except Exception:
-        errors.append(f"fetch:{source.id}")
-        logger.exception("[%s] Fetch failed; processing saved posts", source_name)
+    if dry_run:
+        logger.info("DRY RUN [%s]: cached posts and saved deliveries only; no API requests", source_name)
+    else:
+        try:
+            fetched = await api.fetch_posts(
+                engine, source.id, since=fetch_since, include_replies=True, max_pages=max_pages,
+            )
+            with engine.begin() as connection:
+                save_posts(connection, source.id, fetched)
+            set_last_synced_at(engine, source.id, started_at)
+        except Exception:
+            errors.append(f"fetch:{source.id}")
+            logger.exception("[%s] Fetch failed; processing saved posts", source_name)
 
     # Fetch can resolve a legacy remote identity; check isolation again before delivery.
     source = get_account(engine, source.id)
@@ -99,6 +103,11 @@ async def sync_account(
         )
     cached = load_posts(engine, source.id)
     mirrored = get_mirrored_post_ids(engine, source.id)
+    for post in cached:
+        if post.is_bot_created:
+            mirrored.add(post.id)
+            if not dry_run:
+                record_mirrored_post(engine, source.id, post.id)
     originals = [post for post in cached if post.id not in mirrored]
     posts = exclude_source_only_posts(originals)
     if source.network in REPLY_FILTER_NETWORKS:
@@ -123,6 +132,16 @@ async def sync_account(
     for conversation_id, thread in conversations.items():
         for dest in destinations:
             delivery = pending.get((conversation_id, dest.id))
+            if delivery is not None and any(
+                post_id in mirrored
+                for outbound in delivery.outbounds for post_id in outbound.source_post_ids
+            ):
+                errors.append(f"mirrored-delivery:{source.id}:{dest.id}")
+                logger.error(
+                    "[%s -> %s] Blocked saved delivery containing bot-created source posts; manual review required",
+                    source_name, account_display_name(dest, engine),
+                )
+                continue
             try:
                 if delivery is None:
                     batch = collect_ready_batch(
@@ -136,7 +155,8 @@ async def sync_account(
 
                     # URL expansion must not mutate shared source content or the inbox.
                     batch = [replace(post) for post in batch]
-                    await unwrap_posts_text(batch)
+                    if not dry_run:
+                        await unwrap_posts_text(batch)
                     limits = NETWORK_LIMITS[dest.network]
                     outbounds = (
                         NETWORK_APIS["instagram"].build_outbounds(batch, limits)
@@ -149,12 +169,30 @@ async def sync_account(
                     first_index = next(i for i, post in enumerate(thread) if post.id == batch[0].id)
                     if first_index:
                         reply_ref = mappings.get((thread[first_index - 1].id, dest.id))
-                        if reply_ref and dest.network == "bluesky":
+                        if reply_ref and dest.network == "bluesky" and not dry_run:
                             reply_ref = await NETWORK_APIS["bluesky"].resolve_reply_target(
                                 engine, dest.id, reply_ref,
                             )
                     delivery = Delivery(source.id, dest.id, conversation_id, outbounds, [], reply_ref)
-                    create_delivery(engine, delivery)
+                    if not dry_run:
+                        create_delivery(engine, delivery)
+
+                if dry_run:
+                    remaining = delivery.outbounds[len(delivery.dest_ids):]
+                    logger.info(
+                        "DRY RUN [%s -> %s]: thread %s, %d unsent part(s), %d already checkpointed",
+                        source_name, account_display_name(dest, engine), conversation_id,
+                        len(remaining), len(delivery.dest_ids),
+                    )
+                    for number, outbound in enumerate(remaining, start=len(delivery.dest_ids) + 1):
+                        logger.info(
+                            "DRY RUN part %d/%d: source IDs=%s, media=%d, text=%s",
+                            number, len(delivery.outbounds), ",".join(outbound.source_post_ids),
+                            len(outbound.media), " ".join(outbound.text.split())[:240],
+                        )
+                    source_ids = {post_id for outbound in delivery.outbounds for post_id in outbound.source_post_ids}
+                    synced += sum((post_id, dest.id) not in mappings for post_id in source_ids)
+                    continue
 
                 for outbound in delivery.outbounds[len(delivery.dest_ids):]:
                     media_bytes = []
@@ -191,7 +229,8 @@ async def sync_account(
             continue
         if all((post.id, dest.id) in mappings for post in thread for dest in destinations):
             discard.extend(post.id for post in thread)
-    discard_posts(engine, source.id, discard)
+    if not dry_run:
+        discard_posts(engine, source.id, discard)
     return synced
 
 
@@ -199,7 +238,7 @@ async def run_sync(
     engine: Engine,
     since: datetime | None = None,
     enforce_min_age: bool = True,
-    *, project_id: int | None = None, account_id: int | None = None,
+    *, project_id: int | None = None, account_id: int | None = None, dry_run: bool = False,
 ) -> int:
     if account_id is not None:
         account = get_account(engine, account_id)
@@ -214,11 +253,12 @@ async def run_sync(
         if not project.enabled:
             continue
         started_at = datetime.now(timezone.utc)
-        with engine.begin() as connection:
-            connection.execute(update(projects).where(projects.c.id == project.id).values(
-                last_sync_started_at=started_at, last_sync_finished_at=None,
-                last_sync_count=0, last_sync_error_count=0,
-            ))
+        if not dry_run:
+            with engine.begin() as connection:
+                connection.execute(update(projects).where(projects.c.id == project.id).values(
+                    last_sync_started_at=started_at, last_sync_finished_at=None,
+                    last_sync_count=0, last_sync_error_count=0,
+                ))
 
         accounts = []
         count = 0
@@ -243,7 +283,7 @@ async def run_sync(
                     engine, source, accounts, since=since,
                     enforce_min_age=enforce_min_age and since is None,
                     post_delay_seconds=project.backfill_delay_seconds if since else 0,
-                    errors=errors,
+                    errors=errors, dry_run=dry_run,
                 )
             except Exception:
                 errors.append(f"source:{source.id}")
@@ -256,7 +296,8 @@ async def run_sync(
         }
         if not errors:
             values["last_synced_at"] = finished_at
-        with engine.begin() as connection:
-            connection.execute(update(projects).where(projects.c.id == project.id).values(**values))
+        if not dry_run:
+            with engine.begin() as connection:
+                connection.execute(update(projects).where(projects.c.id == project.id).values(**values))
         total += count
     return total

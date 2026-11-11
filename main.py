@@ -13,6 +13,7 @@ from db.accounts import account_display_name, find_account, list_accounts, set_a
 from db.connection import get_engine
 from db.projects import configure_project, create_project, find_project, list_projects
 from sync.engine import run_sync
+from utils.logging import RedactingFormatter
 
 
 def parse_since(value: str) -> datetime:
@@ -67,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable debug logging.",
     )
+    parser.add_argument("--dry-run", action="store_true", help="Preview cached posts and pending deliveries without API calls, database writes, or migrations; can combine with --project and --since.")
     parser.add_argument("--sync-role", choices=ACCOUNT_SYNC_ROLES, help="Connection role for --auth or --configure-account; reauthentication preserves the current role when omitted.")
     actions.add_argument("--configure-account", choices=list(NETWORK_APIS), metavar="NETWORK", help="Change the role of --project/--label without reauthenticating.")
     parser.add_argument("--project", metavar="NAME", help="Select a project; auth defaults to Default, sync defaults to all enabled projects.")
@@ -118,6 +120,9 @@ async def watch_mode(engine, project_id: int | None = None) -> None:
 
 
 async def async_main(args: argparse.Namespace) -> None:
+    if args.dry_run and any((args.watch, args.auth, args.migrate, args.list_accounts, args.list_projects,
+                            args.configure_account, args.create_project, args.configure_project)):
+        raise ValueError("--dry-run can only be combined with --project, --since, and --verbose")
     if args.sync_role is not None and not (args.auth or args.configure_account):
         raise ValueError("--sync-role requires --auth or --configure-account")
     if args.configure_account and args.sync_role is None:
@@ -133,11 +138,11 @@ async def async_main(args: argparse.Namespace) -> None:
         raise ValueError("--configure-project requires --project NAME")
     if args.project and (args.create_project or args.list_projects or args.migrate):
         raise ValueError("--project cannot be combined with --create-project, --list-projects, or --migrate")
-    interactive = not any((args.watch, args.auth, args.since, args.migrate, args.list_accounts,
+    interactive = not any((args.dry_run, args.watch, args.auth, args.since, args.migrate, args.list_accounts,
                            args.configure_account, args.create_project, args.list_projects, args.configure_project))
     if interactive and not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise ValueError("The TUI needs an interactive terminal. Use docker compose exec -it bot uv run python main.py, or --watch for unattended sync.")
-    engine = get_engine()
+    engine = get_engine(read_only=True) if args.dry_run else get_engine()
 
     if args.migrate:
         logging.info("Database migrations up to date: %s", engine.url)
@@ -192,6 +197,12 @@ async def async_main(args: argparse.Namespace) -> None:
         )
         return
 
+    if args.dry_run:
+        count = await run_sync(engine, since=args.since, enforce_min_age=False,
+                               project_id=project.id if project else None, dry_run=True)
+        logging.info("DRY RUN complete: %d source/destination mapping(s) would be completed; nothing posted or changed", count)
+        return
+
     if args.since:
         count = await run_sync(engine, since=args.since, enforce_min_age=False, project_id=project.id if project else None)
         logging.info("Backfill complete — %d post(s) synced", count)
@@ -208,10 +219,9 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+    handler = logging.StreamHandler()
+    handler.setFormatter(RedactingFormatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, handlers=[handler])
 
     try:
         asyncio.run(async_main(args))

@@ -217,3 +217,13 @@ async def test_publish_mixed_outbound_raises(engine):
 
     with pytest.raises(RuntimeError, match="mixed photos and videos"):
         await publish_outbound(engine, account.id, outbound, raw)
+
+
+@pytest.mark.parametrize("name,expected", [("be-everywhere", True), ("be-everywhere-bot", True), ("BE-EVERYWHERE", True), ("Web", False), (None, False)])
+def test_publisher_metadata_identifies_bot_posts_even_without_local_receipts(name, expected):
+    post = _status_to_post({
+        "id": "1", "content": "Photo thread", "created_at": "2026-11-11T07:00:00Z",
+        "application": {"name": name},
+    }, "author")
+    assert post.is_bot_created is expected
+    assert _normalize_thread_roots([post])[0].is_bot_created is expected

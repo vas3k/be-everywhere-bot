@@ -53,6 +53,7 @@ SOURCE_ONLY_NETWORKS: frozenset[str] = frozenset({NETWORK_RSS, NETWORK_INSTAGRAM
 
 # Suffix on post text — keep on source network only, do not mesh-sync elsewhere.
 SOURCE_ONLY_MARKER = "/x"
+MASTODON_BOT_APP_NAMES = frozenset({"be-everywhere", "be-everywhere-bot"})
 
 # Sources where fetch can return replies — sync filters to own threads after fetch.
 REPLY_FILTER_NETWORKS: frozenset[str] = frozenset(

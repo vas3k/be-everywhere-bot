@@ -10,6 +10,7 @@ COPY . .
 RUN uv sync --frozen --no-dev
 
 ENV PYTHONUNBUFFERED=1
+ENV UV_NO_DEV=1
 
 CMD ["uv", "run", "python", "main.py"]
  

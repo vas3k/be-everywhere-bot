@@ -679,3 +679,103 @@ async def test_legacy_shared_sources_fail_closed_even_with_cached_posts(engine, 
     adapters["telegram"].publish_outbound.assert_not_awaited()
     assert get_project(engine, 1).last_sync_error_count == 1
     assert get_project(engine, project.id).last_sync_error_count == 1
+
+
+async def test_photo_thread_never_echoes_from_any_part_after_polling_or_restart(
+    engine, adapters, post_factory, tmp_path
+):
+    from db.connection import get_engine
+
+    source = create_account(engine, "twitter", "main", "author")
+    destinations = {
+        network: create_account(engine, network, "main", f"{network}-account")
+        for network in ("telegram", "mastodon", "threads", "bluesky")
+    }
+    original = []
+    for index, count in enumerate((4, 4, 4, 1)):
+        original.append(post_factory(
+            str(index + 1), text=f"Part {index + 1}. " * 20,
+            conversation_id="1", in_reply_to_id=str(index) if index else None,
+            media=[MediaItem(f"https://photos.test/{index}-{photo}.jpg", "photo") for photo in range(count)],
+        ))
+    adapters["twitter"].fetch_posts.return_value = original
+    published = {network: [] for network in destinations}
+
+    for network in destinations:
+        async def publish(db, account_id, outbound, media_bytes, *, reply_to=None, network=network):
+            saved = published[network]
+            ids = [f"{network}-{len(saved) + part + 1}" for part in range(
+                len(outbound.media) if network == "telegram" and outbound.media else 1
+            )]
+            root_id = saved[0].conversation_id if saved else ids[0]
+            for part, post_id in enumerate(ids):
+                saved.append(post_factory(
+                    post_id, text=outbound.text if part == 0 else "",
+                    conversation_id=root_id, in_reply_to_id=reply_to,
+                    media=[outbound.media[part]] if network == "telegram" and outbound.media else list(outbound.media),
+                    is_thread_root=not saved,
+                ))
+            return PublishResult(ids[0], ids[0], tuple(ids))
+
+        adapters[network].publish_outbound.side_effect = publish
+        adapters[network].fetch_posts.side_effect = lambda *args, network=network, **kwargs: list(published[network])
+
+    assert await run_sync(engine) == 4 * len(destinations)
+    counts = {network: adapters[network].publish_outbound.await_count for network in destinations}
+    assert counts["mastodon"] == counts["telegram"] == 4
+    for network, account in destinations.items():
+        assert get_mirrored_post_ids(engine, account.id) == {post.id for post in published[network]}
+
+    for _ in range(3):
+        assert await run_sync(engine) == 0
+    engine.dispose()
+    restarted = get_engine(tmp_path / "test.db")
+    try:
+        assert await run_sync(restarted) == 0
+    finally:
+        restarted.dispose()
+    assert {network: adapters[network].publish_outbound.await_count for network in destinations} == counts
+    adapters["twitter"].publish_outbound.assert_not_awaited()
+
+
+@pytest.mark.parametrize("marked_post", ["1", "2"])
+async def test_saved_batch_does_not_repost_posts_later_identified_as_bot_created(
+    engine, adapters, post_factory, marked_post
+):
+    from apis.types import OutboundPost
+    from db.deliveries import Delivery, create_delivery, load_deliveries
+
+    source = create_account(engine, "mastodon", "main", "source")
+    destination = create_account(engine, "telegram", "main", "destination")
+    delivery = Delivery(source.id, destination.id, "1", [
+        OutboundPost("Root and reply", source_post_ids=["1", "2"]),
+    ], [], None)
+    create_delivery(engine, delivery)
+    record_mirrored_post(engine, source.id, marked_post)
+    adapters["mastodon"].fetch_posts.return_value = []
+
+    assert await run_sync(engine) == 0
+    adapters["telegram"].publish_outbound.assert_not_awaited()
+    assert load_deliveries(engine, source.id) == [delivery]
+
+
+async def test_foreign_deployments_bot_thread_cannot_enter_the_mesh_or_saved_queue(
+    engine, adapters, post_factory
+):
+    from apis.types import OutboundPost
+    from db.deliveries import Delivery, create_delivery
+
+    source = create_account(engine, "mastodon", "main", "source")
+    destination = create_account(engine, "telegram", "main", "destination")
+    root = post_factory("foreign-copy", media=[MediaItem("https://media.test/photo.jpg", "photo")])
+    root.is_bot_created = True
+    create_delivery(engine, Delivery(source.id, destination.id, root.id, [
+        OutboundPost("Foreign bot copy", source_post_ids=[root.id]),
+    ], [], None))
+    adapters["mastodon"].fetch_posts.return_value = [root]
+    assert await run_sync(engine) == 0
+    assert root.id in get_mirrored_post_ids(engine, source.id)
+    adapters["mastodon"].fetch_posts.return_value = []
+    assert await run_sync(engine) == 0
+    assert await run_sync(engine, dry_run=True) == 0
+    adapters["telegram"].publish_outbound.assert_not_awaited()

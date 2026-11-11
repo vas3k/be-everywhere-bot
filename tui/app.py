@@ -1,5 +1,4 @@
 import logging
-import re
 from datetime import datetime, timezone
 from math import isfinite
 
@@ -22,21 +21,20 @@ from sync.engine import run_sync
 from tui.forms import AUTH_FIELDS, Editor, ROLE_LABELS
 from tui.task_log import TaskLog
 from tui.history import RecentHistory
+from utils.logging import RedactingFormatter
 
 
 class UILogHandler(logging.Handler):
     def __init__(self, app):
         super().__init__()
         self.app = app
-        self.setFormatter(logging.Formatter("%(asctime)s  %(levelname)s  %(message)s", datefmt="%H:%M:%S"))
+        self.setFormatter(RedactingFormatter("%(asctime)s  %(levelname)s  %(message)s", datefmt="%H:%M:%S"))
 
     def emit(self, record):
         message = self.format(record)
         for secret in self.app.secrets:
             if secret:
                 message = message.replace(secret, "••••")
-        message = re.sub(r"(/bot)[^/\s]+", r"\1••••", message)
-        message = re.sub(r"((?:access_token|client_secret|appsecret_proof)=)[^&\s\"]+", r"\1••••", message)
         window = self.app.task_window
         if window is not None and window.is_mounted:
             window.query_one("#task-log", RichLog).write(Text(message))

@@ -322,6 +322,7 @@ If the bot is stopped for more than 60 days the token expires anyway. You will s
 uv run python main.py                      # interactive TUI (default)
 uv run python main.py --watch              # unattended scheduled sync
 uv run python main.py --since=2026-01-01   # backfill from date
+uv run python main.py --dry-run             # preview cached/queued deliveries; no API calls or writes
 uv run python main.py --list-accounts      # show configured accounts
 uv run python main.py -v                   # debug logging
 ```
@@ -339,7 +340,20 @@ uv run python main.py -v                   # debug logging
 
 `--watch` syncs immediately, then follows `WATCH_CRON` in `config.py` (UTC). Normal cycles respect each project's minimum post age; the initial cycle bypasses it. Failed deliveries resume from saved progress.
 
-Run only one sync operation against a database at a time. Stop the watcher before running manual sync or changing connections. A crash between remote publication and saving progress can still duplicate a post.
+Run only one deployment for the same social accounts, even if deployments use separate databases: each database knows only its own delivery history. Stop old deployments before switching servers. Within a deployment, stop the watcher before running manual sync or changing connections. A crash between remote publication and saving progress can still duplicate a post.
+
+### Dry run
+
+```bash
+uv run python main.py --dry-run
+uv run python main.py --dry-run --project Default
+uv run python main.py --dry-run --project Default --since=2026-01-01
+docker compose run --rm --no-deps bot uv run python main.py --dry-run
+```
+
+Previews cached source posts and pending deliveries using the normal routing, thread formatting, mapping, and mirror rules. Reports source IDs, remaining parts, attachment counts, and text previews. It opens an existing database read-only, runs no migrations, makes no network requests, and changes no watermarks, tokens, or delivery progress. It does not fetch new posts; an empty cache and queue produce an empty plan. URL expansion is skipped, so previews use cached text. The age gate is bypassed, matching a force-sync/startup cycle.
+
+Mastodon posts from apps named `be-everywhere` or `be-everywhere-bot` are also recognized as bot-created independently of local mirror history. Configure other names in `MASTODON_BOT_APP_NAMES` if needed. Saved batches containing identified bot-created source posts are blocked for manual review.
 
 ### Backfill (`--since`)
 
