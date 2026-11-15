@@ -39,6 +39,7 @@ def post_factory(utc_now):
             media=media or [],
             in_reply_to_id=in_reply_to_id,
             is_thread_root=root,
+            is_reply=bool(in_reply_to_id) or not root,
         )
 
     return _make_post

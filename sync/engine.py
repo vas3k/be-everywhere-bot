@@ -110,6 +110,15 @@ async def sync_account(
                 record_mirrored_post(engine, source.id, post.id)
     originals = [post for post in cached if post.id not in mirrored]
     posts = exclude_source_only_posts(originals)
+    if source.network == "threads":
+        # Older cached Threads posts lost reply provenance and must be refetched.
+        verified = [post for post in posts if post.is_reply is not None]
+        if len(verified) != len(posts):
+            logger.warning(
+                "[%s] Withheld %d Threads post(s) without verified reply metadata; refetch required",
+                source_name, len(posts) - len(verified),
+            )
+        posts = verified
     if source.network in REPLY_FILTER_NETWORKS:
         posts = filter_own_threads(posts)
     if since:
@@ -119,6 +128,7 @@ async def sync_account(
     for post in sort_chronologically(posts):
         conversations[post.conversation_id].append(post)
 
+    eligible_ids = {post.id for post in posts}
     mappings = get_sync_mappings(engine, source.id)
     pending = {
         (delivery.conversation_id, delivery.dest_account_id): delivery
@@ -142,6 +152,17 @@ async def sync_account(
                     source_name, account_display_name(dest, engine),
                 )
                 continue
+            if delivery is not None and source.network == "threads":
+                source_ids = {
+                    post_id for outbound in delivery.outbounds for post_id in outbound.source_post_ids
+                }
+                if not source_ids or not source_ids.issubset(eligible_ids):
+                    errors.append(f"unverified-delivery:{source.id}:{dest.id}")
+                    logger.error(
+                        "[%s -> %s] Blocked saved Threads delivery without an eligible original thread; manual review required",
+                        source_name, account_display_name(dest, engine),
+                    )
+                    continue
             try:
                 if delivery is None:
                     batch = collect_ready_batch(
@@ -220,7 +241,6 @@ async def sync_account(
 
     # Keep incomplete threads and recent parents; retire old, fully delivered content.
     discard = []
-    eligible_ids = {post.id for post in posts}
     for post in cached:
         if post.id in mirrored or (post.id not in eligible_ids and post.created_at < fetch_since and not since):
             discard.append(post.id)

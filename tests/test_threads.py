@@ -149,3 +149,35 @@ async def test_fetch_posts_renews_expiring_token_before_calling_api(engine):
         for call in fetch.calls
     )
     assert get_all_credentials(engine, account.id)["access_token"] == "fresh-token"
+
+
+@pytest.mark.parametrize("metadata", [
+    {"is_reply": True},
+    {"is_reply": True, "root_post": {"id": "100"}},
+    {"is_reply": True, "replied_to": {"id": "100"}},
+    {"replied_to": "100"},
+    {"root_post": "100"},
+    {"is_reply": False, "replied_to": {"id": "100"}},
+])
+def test_incomplete_or_conflicting_reply_metadata_never_becomes_an_original(metadata):
+    from utils.filters import filter_own_threads
+
+    post = _item_to_post({
+        "id": "200", "text": "Reply without an @mention",
+        "timestamp": "2026-06-30T12:00:00+0000", **metadata,
+    }, "user-1")
+
+    assert post.is_reply is True
+    assert post.is_thread_root is False
+    assert post.in_reply_to_user_id is None
+    assert filter_own_threads([post]) == []
+
+
+def test_absent_reply_metadata_remains_unknown_instead_of_becoming_an_original():
+    post = _item_to_post({
+        "id": "200", "text": "Could be a reply",
+        "timestamp": "2026-06-30T12:00:00+0000",
+    }, "user-1")
+
+    assert post.is_reply is None
+    assert post.is_thread_root is False

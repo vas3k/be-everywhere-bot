@@ -124,19 +124,24 @@ def _item_to_post(item: dict[str, Any], author_id: str) -> Post:
     text = _strip_trailing_links(item.get("text", ""), has_media=bool(media))
 
     root_post = item.get("root_post")
-    if item.get("is_reply") and root_post:
-        conversation_id = str(
-            root_post.get("id", root_post) if isinstance(root_post, dict) else root_post
-        )
-        replied_to = item.get("replied_to")
-        in_reply_to_id = (
-            str(replied_to.get("id", replied_to))
-            if isinstance(replied_to, dict)
-            else str(replied_to) if replied_to else None
-        )
+    root_id = root_post.get("id") if isinstance(root_post, dict) else root_post
+    replied_to = item.get("replied_to")
+    parent_id = replied_to.get("id") if isinstance(replied_to, dict) else replied_to
+    owner = item.get("owner")
+    owner_id = owner.get("id") if isinstance(owner, dict) else owner
+
+    # Reply fields can be omitted by the API. Only positively identified originals
+    # may become roots; the replies endpoint supplies its own reply classification.
+    if item.get("is_reply") is True or parent_id or root_id:
+        is_reply = True
+    elif item.get("is_reply") is False or str(owner_id) == str(author_id):
+        is_reply = False
     else:
-        conversation_id = str(item["id"])
-        in_reply_to_id = None
+        is_reply = None
+
+    conversation_id = str(root_id or item["id"])
+    parent_owner = replied_to.get("owner") if isinstance(replied_to, dict) else None
+    parent_author_id = parent_owner.get("id") if isinstance(parent_owner, dict) else parent_owner
 
     return Post(
         id=str(item["id"]),
@@ -145,9 +150,10 @@ def _item_to_post(item: dict[str, Any], author_id: str) -> Post:
         conversation_id=conversation_id,
         author_id=str(author_id),
         media=media,
-        in_reply_to_id=in_reply_to_id,
-        in_reply_to_user_id=str(author_id) if in_reply_to_id else None,
-        is_thread_root=conversation_id == str(item["id"]),
+        in_reply_to_id=str(parent_id) if parent_id else None,
+        in_reply_to_user_id=str(parent_author_id) if parent_author_id else None,
+        is_thread_root=is_reply is False,
+        is_reply=is_reply,
     )
 
 
@@ -330,21 +336,21 @@ async def fetch_posts(
     )
     if include_replies:
         raw_items.extend(
-            await _fetch_endpoint(
+            {**item, "is_reply": True}
+            for item in await _fetch_endpoint(
                 access_token, user_id, "replies", since=since, max_pages=max_pages
             )
         )
 
     skipped: dict[str, int] = {}
     posts: list[Post] = []
-    seen_ids: set[str] = set()
-
+    by_id: dict[str, dict[str, Any]] = {}
     for item in raw_items:
-        item_id = str(item.get("id", ""))
-        if not item_id or item_id in seen_ids:
-            continue
-        seen_ids.add(item_id)
+        if item.get("id"):
+            item_id = str(item["id"])
+            by_id[item_id] = {**by_id.get(item_id, {}), **item}
 
+    for item in by_id.values():
         reason = _skip_reason(item)
         if reason:
             skipped[reason] = skipped.get(reason, 0) + 1

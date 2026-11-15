@@ -37,12 +37,19 @@ def _has_connected_parent(
     """True when every ancestor in the reply chain is present (root included)."""
     if post.id in cache:
         return cache[post.id]
+    # Mark the path ineligible until resolved, so malformed cycles fail closed.
+    cache[post.id] = False
     if not post.in_reply_to_id:
-        result = True
+        result = post.is_reply is not True and post.conversation_id == post.id
     elif post.in_reply_to_id not in by_id:
         result = False
     else:
-        result = _has_connected_parent(by_id[post.in_reply_to_id], by_id, cache)
+        parent = by_id[post.in_reply_to_id]
+        result = (
+            parent.author_id == post.author_id
+            and parent.conversation_id == post.conversation_id
+            and _has_connected_parent(parent, by_id, cache)
+        )
     cache[post.id] = result
     return result
 

@@ -161,3 +161,17 @@ def test_exclude_orphan_thread_replies_drops_gap_in_chain():
     )
     kept = exclude_orphan_thread_replies([root, tail])
     assert [p.id for p in kept] == ["1"]
+
+
+def test_reply_cannot_attach_to_a_different_authors_or_conversations_root(post_factory):
+    root = post_factory("1")
+    foreign = post_factory("2", conversation_id="1", in_reply_to_id="1")
+    foreign.author_id = "someone-else"
+    different_thread = post_factory("3", conversation_id="another-root", in_reply_to_id="1")
+    assert filter_own_threads([root, foreign, different_thread]) == [root]
+
+
+def test_reply_cycle_is_ineligible(post_factory):
+    first = post_factory("1", conversation_id="root", in_reply_to_id="2")
+    second = post_factory("2", conversation_id="root", in_reply_to_id="1")
+    assert filter_own_threads([first, second]) == []

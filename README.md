@@ -141,7 +141,7 @@ Use `--label` to connect multiple accounts on the same network (e.g. personal an
 **Sync rules:**
 
 - Read + publish; 4,096 characters for text, 1,024 for captions; up to 4 mixed photo/video attachments per outbound.
-- Join album members by album ID; ordinary messages and replies remain separate conversations.
+- Join album members by album ID; ordinary original messages remain separate conversations. Skip replies and forwarded messages.
 - Read incoming channel updates only; no full-history backfill. Extract photos, videos, and animations; skip messages with neither text nor supported media.
 
 **Portals:** [@BotFather](https://t.me/BotFather) · [Telegram Bot API docs](https://core.telegram.org/bots)
@@ -190,7 +190,7 @@ Use `--label` to connect multiple accounts on the same network (e.g. personal an
 **Sync rules:**
 
 - Read + publish; 500 characters, up to 20 attachments; separate photos and videos.
-- Skip reposts, quotes, and text beginning with `@` after whitespace.
+- Skip reposts, quotes, and text beginning with `@` after whitespace. Replies are eligible only as continuations of a complete own thread; missing or unverified reply metadata blocks sync, including saved deliveries.
 - Publish media via externally fetchable URLs; omit `tgfile:` attachments. Current validation accepts HTTP/HTTPS without checking public reachability.
 
 **Portal:** [developers.facebook.com](https://developers.facebook.com/apps/)

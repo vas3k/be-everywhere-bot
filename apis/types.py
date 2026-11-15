@@ -23,6 +23,7 @@ class Post:
     in_reply_to_user_id: str | None = None
     is_thread_root: bool = False
     is_bot_created: bool = False
+    is_reply: bool | None = None  # None means the provider did not establish reply status.
 
 
 @dataclass

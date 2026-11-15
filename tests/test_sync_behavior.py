@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 import respx
 
+from apis.threads import fetch_posts as fetch_threads_posts
 from apis.types import MediaItem, PublishResult
 from config import (
     NETWORK_LIMITS,
@@ -779,3 +780,116 @@ async def test_foreign_deployments_bot_thread_cannot_enter_the_mesh_or_saved_que
     assert await run_sync(engine) == 0
     assert await run_sync(engine, dry_run=True) == 0
     adapters["telegram"].publish_outbound.assert_not_awaited()
+
+
+@pytest.mark.parametrize("original_metadata", [{"is_reply": False}, {"owner": {"id": "author"}}])
+async def test_threads_api_replies_never_leak_into_mesh_but_own_threads_still_sync(
+    engine, adapters, monkeypatch, http_mock, tmp_path, original_metadata
+):
+    import httpx
+
+    from db.accounts import set_credentials
+    from db.connection import get_engine
+
+    source = create_account(engine, "threads", "main", "author")
+    destinations = [
+        create_account(engine, network, "main", f"{network}-account")
+        for network in ("twitter", "telegram", "mastodon", "bluesky")
+    ]
+    set_credentials(engine, source.id, {
+        "access_token": "test-token", "user_id": "author", "username": "author",
+        "token_expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+    })
+    monkeypatch.setattr(import_module("apis.threads"), "fetch_posts", fetch_threads_posts)
+    timestamp = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    original = {"id": "100", "text": "Original", "timestamp": timestamp, **original_metadata}
+    own_reply = {
+        "id": "101", "text": "Own continuation", "timestamp": timestamp,
+        "root_post": {"id": "100"}, "replied_to": {"id": "100"},
+    }
+    replies = [
+        own_reply,
+        {"id": "200", "text": "To a friend", "timestamp": timestamp, "is_reply": True},
+        {"id": "201", "text": "To a friend again", "timestamp": timestamp},
+        {"id": "202", "text": "Foreign conversation", "timestamp": timestamp,
+         "root_post": {"id": "friend-root"}, "replied_to": {"id": "friend-root"}},
+        {"id": "203", "text": "Tail of foreign conversation", "timestamp": timestamp,
+         "root_post": {"id": "friend-root"}, "replied_to": {"id": "202"}},
+        {"id": "204", "text": "Conflicting endpoint metadata", "timestamp": timestamp},
+        {"id": "205", "text": "Missing direct parent", "timestamp": timestamp,
+         "root_post": {"id": "100"}},
+    ]
+    http_mock.get("https://graph.threads.net/v1.0/author/threads").mock(
+        return_value=httpx.Response(200, json={"data": [
+            original,
+            {"id": "204", "text": "Conflicting endpoint metadata", "timestamp": timestamp,
+             "is_reply": False, "owner": {"id": "author"}},
+            {"id": "300", "text": "Unclassified item", "timestamp": timestamp},
+            {"id": "301", "text": "Quote", "timestamp": timestamp, "is_quote_post": True},
+            {"id": "302", "text": "Repost", "timestamp": timestamp, "reposted_post": {"id": "other"}},
+        ]}),
+    )
+    http_mock.get("https://graph.threads.net/v1.0/author/replies").mock(
+        return_value=httpx.Response(200, json={"data": replies}),
+    )
+
+    assert await run_sync(engine, enforce_min_age=False) == 2 * len(destinations)
+    for destination in destinations:
+        outbound = adapters[destination.network].publish_outbound.await_args.args[2]
+        assert outbound.text == "Original\n\nOwn continuation"
+        assert outbound.source_post_ids == ["100", "101"]
+        for reply in replies[1:]:
+            assert not is_synced(engine, source.id, reply["id"], destination.id)
+    assert await run_sync(engine, enforce_min_age=False) == 0
+    engine.dispose()
+    restarted = get_engine(tmp_path / "test.db")
+    try:
+        assert await run_sync(restarted, enforce_min_age=False) == 0
+    finally:
+        restarted.dispose()
+    assert all(adapters[dest.network].publish_outbound.await_count == 1 for dest in destinations)
+
+
+@pytest.mark.parametrize("cached_state", ["legacy", "reply", "missing", "valid"])
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_saved_threads_delivery_requires_verified_eligible_source_posts(
+    engine, adapters, post_factory, cached_state, dry_run
+):
+    from apis.types import OutboundPost
+    from db.deliveries import Delivery, create_delivery, load_deliveries
+    from db.posts import save_posts
+
+    source = create_account(engine, "threads", "main", "author")
+    destination = create_account(engine, "telegram", "main", "channel")
+    if cached_state != "missing":
+        post = post_factory("1")
+        if cached_state == "legacy":
+            post.is_reply = None
+        elif cached_state == "reply":
+            post.is_reply = True
+        with engine.begin() as connection:
+            save_posts(connection, source.id, [post])
+            if cached_state == "legacy":
+                from sqlalchemy import select
+                from db.schema import source_posts
+
+                payload = connection.execute(select(source_posts.c.payload).where(
+                    source_posts.c.account_id == source.id,
+                )).scalar_one()
+                payload.pop("is_reply")
+                connection.execute(source_posts.update().where(
+                    source_posts.c.account_id == source.id,
+                ).values(payload=payload))
+    delivery = Delivery(source.id, destination.id, "1", [
+        OutboundPost("Previously queued content", source_post_ids=["1"]),
+    ], [], None)
+    create_delivery(engine, delivery)
+    adapters["threads"].fetch_posts.side_effect = RuntimeError("Provider unavailable")
+
+    assert await run_sync(engine, enforce_min_age=False, dry_run=dry_run) == (cached_state == "valid")
+    if dry_run or cached_state != "valid":
+        adapters["telegram"].publish_outbound.assert_not_awaited()
+        assert load_deliveries(engine, source.id) == [delivery]
+    else:
+        adapters["telegram"].publish_outbound.assert_awaited_once()
+        assert load_deliveries(engine, source.id) == []

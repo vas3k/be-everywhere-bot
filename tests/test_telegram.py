@@ -247,3 +247,13 @@ async def test_shared_destination_updates_are_acknowledged_without_becoming_sour
     assert load_posts(engine, first.id) == load_posts(engine, second.id) == []
     assert get_account(engine, first.id).remote_id == get_account(engine, second.id).remote_id == "-100123"
     assert get_mirrored_post_ids(engine, second.id) == {"10"}
+
+
+@pytest.mark.parametrize("interaction", ["reply_to_message", "external_reply", "forward_origin"])
+@pytest.mark.parametrize("metadata", [{}, {"message_id": 1}])
+def test_channel_replies_and_forwards_never_become_original_posts(interaction, metadata):
+    message = {
+        "message_id": 10, "date": 1782813600, "text": "An interaction",
+        "chat": {"id": -1001, "username": "news"}, interaction: metadata,
+    }
+    assert _message_to_post(message, "@news") is None

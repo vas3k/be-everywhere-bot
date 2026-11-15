@@ -131,6 +131,8 @@ def _message_to_post(message: dict, channel_id: str) -> Post | None:
     chat = message.get("chat") or {}
     if not _chat_matches(channel_id, chat):
         return None
+    if any(field in message for field in ("reply_to_message", "external_reply", "forward_origin")):
+        return None
 
     text = message.get("text") or message.get("caption") or ""
     media = _extract_media(message)
