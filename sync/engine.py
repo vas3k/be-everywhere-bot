@@ -138,6 +138,11 @@ async def sync_account(
     for conversation_id, dest_id in pending:
         conversations.setdefault(conversation_id, [])
 
+    publish_after = {
+        dest.id: datetime.fromisoformat(value).astimezone(timezone.utc)
+        for dest in destinations
+        if (value := get_all_credentials(engine, dest.id).get("publish_after"))
+    }
     synced = 0
     for conversation_id, thread in conversations.items():
         for dest in destinations:
@@ -165,6 +170,9 @@ async def sync_account(
                     continue
             try:
                 if delivery is None:
+                    cutoff = publish_after.get(dest.id)
+                    if cutoff and thread and min(post.created_at for post in thread) < cutoff:
+                        continue
                     batch = collect_ready_batch(
                         thread,
                         is_synced=lambda post_id: (post_id, dest.id) in mappings,
@@ -247,7 +255,7 @@ async def sync_account(
     for conversation_id, thread in conversations.items():
         if not thread or any(post.created_at >= fetch_since for post in thread):
             continue
-        if all((post.id, dest.id) in mappings for post in thread for dest in destinations):
+        if all((post.id, dest.id) in mappings or (dest.id in publish_after and min(item.created_at for item in thread) < publish_after[dest.id]) for post in thread for dest in destinations):
             discard.extend(post.id for post in thread)
     if not dry_run:
         discard_posts(engine, source.id, discard)

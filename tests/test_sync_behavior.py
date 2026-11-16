@@ -893,3 +893,20 @@ async def test_saved_threads_delivery_requires_verified_eligible_source_posts(
     else:
         adapters["telegram"].publish_outbound.assert_awaited_once()
         assert load_deliveries(engine, source.id) == []
+
+
+async def test_destination_cutoff_does_not_skip_other_networks(engine, adapters, post_factory, utc_now):
+    from db.accounts import set_credentials
+    source = create_account(engine, "rss", "club", "feed")
+    twitter = create_account(engine, "twitter", "club", "x", sync_role="destination_only")
+    mastodon = create_account(engine, "mastodon", "club", "m", sync_role="destination_only")
+    set_credentials(engine, twitter.id, {"publish_after": utc_now.isoformat()})
+    adapters["rss"].fetch_posts.return_value = [
+        post_factory("old", created_at=utc_now-timedelta(days=1)),
+        post_factory("new", created_at=utc_now),
+    ]
+    assert await run_sync(engine, enforce_min_age=False) == 3
+    assert not is_synced(engine, source.id, "old", twitter.id)
+    assert is_synced(engine, source.id, "new", twitter.id)
+    assert is_synced(engine, source.id, "old", mastodon.id)
+    assert await run_sync(engine, enforce_min_age=False) == 0

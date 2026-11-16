@@ -1,6 +1,7 @@
 import base64
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +17,7 @@ from db.accounts import (
     Account,
     save_account,
     get_all_credentials,
+    set_credentials,
 )
 
 logger = logging.getLogger(__name__)
@@ -170,6 +172,36 @@ def _require_creds(engine: Engine, account_id: int) -> dict[str, str]:
     return creds
 
 
+async def ensure_session(engine: Engine, account_id: int) -> dict[str, str]:
+    creds = _require_creds(engine, account_id)
+    if not creds.get("refresh_token"):
+        return creds
+    if float(creds.get("expires_at", "0")) > time.time() + 300:
+        return creds
+    if not creds.get("client_id"):
+        raise RuntimeError("X OAuth refresh requires the client ID")
+
+    auth = httpx.BasicAuth(creds["client_id"], creds["client_secret"]) if creds.get("client_secret") else None
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            "https://api.x.com/2/oauth2/token", auth=auth,
+            data={"grant_type": "refresh_token", "refresh_token": creds["refresh_token"],
+                  "client_id": creds["client_id"]},
+        )
+    if not response.is_success:
+        raise RuntimeError(f"X OAuth refresh failed (HTTP {response.status_code}); credentials retained")
+    data = response.json()
+    if not data.get("access_token") or not data.get("expires_in"):
+        raise RuntimeError("X OAuth refresh returned incomplete credentials")
+    renewed = {
+        "bearer_token": data["access_token"],
+        "refresh_token": data.get("refresh_token", creds["refresh_token"]),
+        "expires_at": str(time.time() + float(data["expires_in"])),
+    }
+    set_credentials(engine, account_id, renewed)
+    return {**creds, **renewed}
+
+
 async def _api_get(
     bearer_token: str,
     path: str,
@@ -240,6 +272,17 @@ async def _upload_media(
     content_type, category = _twitter_media_type(item)
     headers = {"Authorization": f"Bearer {bearer_token}"}
 
+    if item.media_type == "photo":
+        if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            content_type = "image/png"
+        response = await client.post(
+            f"{TWITTER_APP.api_base_url}/media/upload", headers=headers,
+            data={"media_category": "tweet_image", "media_type": content_type},
+            files={"media": ("preview.png" if content_type == "image/png" else "preview.jpg", raw, content_type)},
+        )
+        response.raise_for_status()
+        return str(response.json()["data"]["id"])
+
     init = await client.post(
         MEDIA_UPLOAD_URL,
         headers=headers,
@@ -303,7 +346,7 @@ async def fetch_posts(
     include_replies: bool = True,
     max_pages: int | None = None,
 ) -> list[Post]:
-    creds = _require_creds(engine, account_id)
+    creds = await ensure_session(engine, account_id)
     bearer_token = creds["bearer_token"]
     user_id = creds["user_id"]
 
@@ -368,7 +411,7 @@ async def fetch_posts(
 async def download_media(
     media: MediaItem, engine: Engine, account_id: int
 ) -> bytes:
-    creds = _require_creds(engine, account_id)
+    creds = await ensure_session(engine, account_id)
     bearer_token = creds["bearer_token"]
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
         response = await client.get(media.url)
@@ -389,7 +432,7 @@ async def publish_outbound(
     *,
     reply_to: str | None = None,
 ) -> PublishResult:
-    creds = _require_creds(engine, account_id)
+    creds = await ensure_session(engine, account_id)
     bearer_token = creds["bearer_token"]
     text = outbound.text or ""
     media = outbound.media
