@@ -236,7 +236,7 @@ Use `--label` to connect multiple accounts on the same network (e.g. personal an
 
 **Sync rules:**
 
-- Source only; publish entry title, summary, and link as text. Do not import article media.
+- Source only; publish entry title, summary, and link as text by default. Optional account settings `title_only=true` and `link_previews=true` publish the title and link with the article’s public Open Graph image. Bluesky receives a clickable website card; other destinations receive the preview image as an attachment. `start_after` accepts an ISO timestamp to exclude older entries, including during overlapping fetches.
 
 **What you need:** Feed URL (RSS 2.0 or Atom)
 

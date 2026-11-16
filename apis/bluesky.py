@@ -11,6 +11,7 @@ from utils.http_utils import format_api_error, parse_error_detail
 from apis.types import MediaItem, OutboundPost, Post, PublishResult
 from utils.media import ensure_not_mixed, partition_photos_and_videos
 from utils.posts import sort_chronologically
+from utils.urls import URL_IN_TEXT
 from config import BLUESKY_APP, NETWORK_BLUESKY
 from db.accounts import (
     Account,
@@ -310,7 +311,7 @@ async def _upload_blob(
     result = await session.post_bytes(
         "com.atproto.repo.uploadBlob",
         raw,
-        _media_content_type(item),
+        "image/png" if raw.startswith(b"\x89PNG\r\n\x1a\n") else _media_content_type(item),
     )
     blob = result.get("blob")
     if not blob:
@@ -354,6 +355,19 @@ async def _build_embed(
         media, media_bytes, max_photos=4, max_videos=1, log_id=log_id
     )
     ensure_not_mixed(photos, videos, network="Bluesky")
+
+    if len(photos) == 1 and not videos and photos[0][0].link_url:
+        item, raw = photos[0]
+        blob = await _upload_blob(session, raw, item)
+        return {
+            "$type": "app.bsky.embed.external",
+            "external": {
+                "uri": item.link_url,
+                "title": item.link_title or item.alt_text or "",
+                "description": item.link_description or "",
+                "thumb": blob,
+            },
+        }
 
     if photos:
         images: list[dict[str, Any]] = []
@@ -522,6 +536,17 @@ async def publish_outbound(
         "text": text,
         "createdAt": _now_iso(),
     }
+
+    facets = []
+    for match in URL_IN_TEXT.finditer(text):
+        url = match.group(0).rstrip(".,;:!?")
+        start = len(text[:match.start()].encode("utf-8"))
+        facets.append({
+            "index": {"byteStart": start, "byteEnd": start + len(url.encode("utf-8"))},
+            "features": [{"$type": "app.bsky.richtext.facet#link", "uri": url}],
+        })
+    if facets:
+        record["facets"] = facets
 
     if media and bytes_list:
         embed = await _build_embed(

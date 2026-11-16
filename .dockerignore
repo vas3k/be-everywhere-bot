@@ -22,3 +22,6 @@ htmlcov/
 .idea/
 .vscode/
 *.md
+
+# One-time production backfill is not part of the normal bot image.
+oneoff-club-backfill/

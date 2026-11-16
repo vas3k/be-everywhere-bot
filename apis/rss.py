@@ -4,6 +4,8 @@ import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlsplit
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -35,6 +37,21 @@ Use --label to connect multiple feeds.
 
 _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 _TAG_RE = re.compile(r"<[^>]+>")
+
+
+class OpenGraphParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.metadata: dict[str, str] = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "meta":
+            return
+        attributes = dict(attrs)
+        key = attributes.get("property") or attributes.get("name") or ""
+        value = attributes.get("content")
+        if key.startswith("og:") and value:
+            self.metadata.setdefault(key, value)
 
 
 def _stable_post_id(*candidates: str | None) -> str:
@@ -218,6 +235,36 @@ async def fetch_posts(
 
     if since_utc:
         posts = [p for p in posts if p.created_at >= since_utc]
+
+    if creds.get("start_after"):
+        start_after = datetime.fromisoformat(creds["start_after"]).astimezone(timezone.utc)
+        posts = [post for post in posts if post.created_at > start_after]
+
+    if creds.get("title_only") == "true" or creds.get("link_previews") == "true":
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            for post in posts:
+                title, _, remainder = post.text.partition("\n\n")
+                link = post.text.rsplit("\n\n", 1)[-1]
+                if not remainder or urlsplit(link).scheme not in ("http", "https"):
+                    continue
+                if creds.get("title_only") == "true":
+                    post.text = f"{title}\n\n{link}"
+                if creds.get("link_previews") != "true":
+                    continue
+                response = await client.get(link)
+                response.raise_for_status()
+                parser = OpenGraphParser()
+                parser.feed(response.text)
+                metadata = parser.metadata
+                image = metadata.get("og:image")
+                if image:
+                    image = urljoin(str(response.url), image)
+                    if urlsplit(image).scheme in ("http", "https"):
+                        post.media = [MediaItem(
+                            url=image, media_type="photo", alt_text=metadata.get("og:title", title),
+                            link_url=link, link_title=metadata.get("og:title", title),
+                            link_description=metadata.get("og:description", ""),
+                        )]
 
     posts = sort_chronologically(posts)
     logger.info(

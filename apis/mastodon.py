@@ -226,9 +226,9 @@ async def _upload_media(
         data=data,
         files={
             "file": (
-                _media_filename(item, index),
+                f"image_{index}.png" if raw.startswith(b"\x89PNG\r\n\x1a\n") else _media_filename(item, index),
                 raw,
-                _media_content_type(item),
+                "image/png" if raw.startswith(b"\x89PNG\r\n\x1a\n") else _media_content_type(item),
             )
         },
     )

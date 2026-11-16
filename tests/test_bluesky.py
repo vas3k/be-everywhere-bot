@@ -137,3 +137,31 @@ def test_networks_that_disallow_mixed_media():
             assert limits.allows_mixed_media is False, network
         else:
             assert limits.allows_mixed_media is True, network
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,urls", [
+    ("Привет 🌍 https://vas3k.club/post/123/", ["https://vas3k.club/post/123/"]),
+    ("https://example.org/a, ещё (https://example.org/b).", ["https://example.org/a", "https://example.org/b"]),
+    ("https://example.org/путь https://example.org/путь", ["https://example.org/путь", "https://example.org/путь"]),
+    ("Текст без ссылки 🌍", []),
+])
+async def test_publish_marks_links_with_utf8_byte_ranges(monkeypatch, text, urls):
+    from unittest.mock import AsyncMock
+    from apis import bluesky
+    from apis.types import OutboundPost
+
+    session = AsyncMock()
+    session.did = "did:plc:test"
+    session.post_json.return_value = {"uri": "at://did:plc:test/app.bsky.feed.post/abc", "cid": "cid"}
+    monkeypatch.setattr(bluesky.BlueskySession, "load", lambda *args: session)
+    await bluesky.publish_outbound(None, 1, OutboundPost(text, [], ["source"]))
+    record = session.post_json.call_args.args[1]["record"]
+    facets = record.get("facets", [])
+    assert len(facets) == len(urls)
+    encoded = text.encode("utf-8")
+    for facet, url in zip(facets, urls):
+        bounds = facet["index"]
+        assert encoded[bounds["byteStart"]:bounds["byteEnd"]].decode("utf-8") == url
+        assert facet["features"] == [{"$type": "app.bsky.richtext.facet#link", "uri": url}]
+    assert record["text"] == text

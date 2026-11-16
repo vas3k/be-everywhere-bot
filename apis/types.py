@@ -7,6 +7,9 @@ class MediaItem:
     url: str
     media_type: str  # "photo" | "video" | "animated_gif"
     alt_text: str | None = None
+    link_url: str | None = None
+    link_title: str | None = None
+    link_description: str | None = None
 
 
 @dataclass
