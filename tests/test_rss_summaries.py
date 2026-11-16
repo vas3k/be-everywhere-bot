@@ -35,14 +35,14 @@ async def test_summary_keeps_link_before_summary_and_media(network, rss_post, ph
     assert len(json.loads(request["input"])["excerpt"]) <= 5000
 
 
-@pytest.mark.parametrize("case", ["dry_run", "short_context", "no_key", "http_error", "malformed", "incomplete", "too_long", "first_person"])
+@pytest.mark.parametrize("case", ["dry_run", "short_context", "no_key", "http_error", "malformed", "incomplete", "too_long", "article_framing"])
 @respx.mock
 async def test_unavailable_summary_falls_back_without_blocking(case, rss_post, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key" if case != "no_key" else "")
     if case == "short_context":
         rss_post.rss_context = "Закрытый пост"
     payload = {"status": "completed", "output": [{"type": "message", "content": [{
-        "type": "output_text", "text": json.dumps({"summary": "я ходил гулять" if case == "first_person" else "Слово " * 100})}]}]}
+        "type": "output_text", "text": json.dumps({"summary": "В центре дайджеста — новые игры." if case == "article_framing" else "Слово " * 100})}]}]}
     if case == "malformed":
         payload = {"status": "completed"}
     if case == "incomplete":
@@ -74,3 +74,15 @@ def test_rss_context_survives_cache_and_old_posts_still_load(engine, post_factor
     cached = {post.id: post for post in load_posts(engine, account.id)}
     assert cached[parsed.id].rss_context == parsed.rss_context
     assert cached["old"].rss_context == ""
+
+
+@respx.mock
+async def test_first_person_caption_is_preserved(rss_post, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    caption = "Я начал гулять каждый день. Короткий маршрут помог закрепить привычку."
+    respx.post("https://api.openai.com/v1/responses").mock(return_value=httpx.Response(200, json={
+        "status": "completed", "output": [{"type": "message", "content": [{
+            "type": "output_text", "text": json.dumps({"summary": caption})}]}],
+    }))
+    await summarize_rss_posts([rss_post], "threads")
+    assert rss_post.text == f"{rss_post.rss_title}\n\n{rss_post.rss_link}\n\n{caption}"
