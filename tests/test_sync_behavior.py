@@ -910,3 +910,33 @@ async def test_destination_cutoff_does_not_skip_other_networks(engine, adapters,
     assert is_synced(engine, source.id, "new", twitter.id)
     assert is_synced(engine, source.id, "old", mastodon.id)
     assert await run_sync(engine, enforce_min_age=False) == 0
+
+
+async def test_rss_ai_is_opt_in_and_frozen_across_retry(engine, adapters, post_factory, monkeypatch):
+    from dataclasses import replace
+    from db.accounts import set_credentials
+    from db.deliveries import load_deliveries
+
+    source = create_account(engine, "rss", "feed", "feed")
+    enabled = create_account(engine, "bluesky", "club", "club", sync_role="destination_only")
+    disabled = create_account(engine, "mastodon", "plain", "plain", sync_role="destination_only")
+    set_credentials(engine, enabled.id, {"rss_ai_summaries": "true"})
+    adapters["rss"].fetch_posts.return_value = [replace(
+        post_factory("rss-1", text="Title\n\nhttps://example.com/post"),
+        rss_title="Title", rss_link="https://example.com/post", rss_context="Public context " * 100,
+    )]
+    async def summarize(posts, network, **kwargs):
+        posts[0].text += "\n\nFrozen summary."
+    summary = AsyncMock(side_effect=summarize)
+    monkeypatch.setattr("sync.engine.summarize_rss_posts", summary)
+    adapters["bluesky"].publish_outbound.side_effect = RuntimeError("Temporary failure")
+    await run_sync(engine)
+    assert summary.await_count == 1
+    assert load_deliveries(engine, source.id)[0].outbounds[0].text.endswith("Frozen summary.")
+    assert adapters["mastodon"].publish_outbound.call_args.args[2].text == "Title\n\nhttps://example.com/post"
+    adapters["bluesky"].publish_outbound.side_effect = None
+    adapters["bluesky"].publish_outbound.return_value = PublishResult("published")
+    await run_sync(engine)
+    assert summary.await_count == 1
+    assert is_synced(engine, source.id, "rss-1", enabled.id)
+    assert is_synced(engine, source.id, "rss-1", disabled.id)

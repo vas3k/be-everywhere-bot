@@ -26,6 +26,9 @@ class Post:
     in_reply_to_user_id: str | None = None
     is_thread_root: bool = False
     is_bot_created: bool = False
+    rss_title: str = ""
+    rss_link: str = ""
+    rss_context: str = ""  # Only content already exposed by the public feed.
     is_reply: bool | None = None  # None means the provider did not establish reply status.
 
 

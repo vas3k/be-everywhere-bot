@@ -125,6 +125,9 @@ def _parse_rss(root: ET.Element, feed_url: str) -> list[Post]:
             Post(
                 id=post_id,
                 text=text,
+                rss_title=title.strip(),
+                rss_link=link,
+                rss_context=_strip_html(description)[:5000],
                 created_at=_parse_date(pub_date),
                 conversation_id=post_id,
                 author_id=feed_id,
@@ -170,6 +173,9 @@ def _parse_atom(root: ET.Element, feed_url: str) -> list[Post]:
             Post(
                 id=post_id,
                 text=text,
+                rss_title=title.strip(),
+                rss_link=link,
+                rss_context=_strip_html(summary)[:5000],
                 created_at=_parse_date(published),
                 conversation_id=post_id,
                 author_id=feed_id,

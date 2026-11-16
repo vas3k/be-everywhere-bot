@@ -4,5 +4,8 @@ services:
     container_name: be-everywhere-bot
     restart: unless-stopped
     command: ["uv", "run", "python", "main.py", "--watch"]
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_SUMMARY_MODEL: ${OPENAI_SUMMARY_MODEL:-gpt-6-luna}
     volumes:
       - ./data:/app/data
