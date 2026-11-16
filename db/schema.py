@@ -45,6 +45,7 @@ accounts = Table(
     Column("sync_role", String(32), nullable=False, server_default="source_and_destination"),
     Column("created_at", DateTime, nullable=False),
     Column("deleted_at", DateTime),
+    Column("ai_summary", Boolean, nullable=False, server_default="0"),
     UniqueConstraint("project_id", "network", "label", name="uq_accounts_project_network_label"),
     CheckConstraint("sync_role IN ('source_and_destination', 'source_only', 'destination_only')"),
 )

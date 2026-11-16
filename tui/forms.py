@@ -87,6 +87,8 @@ class Editor(ModalScreen):
                     yield Label("Sync role")
                     role = self.account.sync_role if self.account else "source_and_destination"
                     yield Select([(ROLE_LABELS[item], item) for item in ACCOUNT_SYNC_ROLES], value=role, allow_blank=False, id="role", disabled=network in SOURCE_ONLY_NETWORKS)
+                    yield Checkbox("AI summary · incoming posts from any source", value=self.account.ai_summary if self.account else False, id="ai-summary", disabled=role == "source_only")
+                    yield Static("Uses OPENAI_API_KEY. Off keeps original reposting; saved deliveries stay unchanged.", classes="muted")
                     yield Static("Shared remote accounts must be destination-only in every project.", classes="muted")
                     if self.kind == "auth":
                         credentials = get_all_credentials(self.app.engine, self.account.id) if self.account else {}
@@ -112,6 +114,12 @@ class Editor(ModalScreen):
             self.query_one("#cancel", Button).focus()
 
     def on_select_changed(self, event: Select.Changed):
+        if event.select.id == "role":
+            summary = self.query_one("#ai-summary", Checkbox)
+            summary.disabled = event.value == "source_only"
+            if summary.disabled:
+                summary.value = False
+            return
         if event.select.id != "network" or event.value is Select.BLANK:
             return
         role = self.query_one("#role", Select)

@@ -30,6 +30,7 @@ class Account:
     remote_id: str
     project_id: int = 1
     sync_role: str = "source_and_destination"
+    ai_summary: bool = False
 
 
 def account_from_row(row) -> Account:
@@ -40,6 +41,7 @@ def account_from_row(row) -> Account:
         remote_id=row.remote_id,
         project_id=row.project_id,
         sync_role=row.sync_role,
+        ai_summary=bool(row.ai_summary),
     )
 
 
@@ -156,10 +158,10 @@ def save_account(
             index_elements=["project_id", "network", "label"], set_={"remote_id": remote_id, "sync_role": sync_role},
         ).returning(accounts.c.id)).scalar_one()
         write_credentials(connection, account_id, credentials)
-    return Account(account_id, network, label, remote_id, project_id, sync_role)
+    return get_account(engine, account_id)
 
 
-def set_account_role(engine: Engine, account_id: int, sync_role: str, *, label: str | None = None) -> Account:
+def set_account_role(engine: Engine, account_id: int, sync_role: str, *, label: str | None = None, ai_summary: bool | None = None) -> Account:
     account = get_account(engine, account_id)
     if account is None:
         raise ValueError(f"Unknown account ID: {account_id}")
@@ -172,7 +174,10 @@ def set_account_role(engine: Engine, account_id: int, sync_role: str, *, label: 
             connection, account.network, account.project_id, account.remote_id,
             sync_role, credentials, allow_destination_only=True,
         )
-        connection.execute(update(accounts).where(accounts.c.id == account_id).values(sync_role=sync_role, label=label))
+        connection.execute(update(accounts).where(accounts.c.id == account_id).values(
+            sync_role=sync_role, label=label,
+            ai_summary=(account.ai_summary if ai_summary is None else bool(ai_summary)) if sync_role != "source_only" else False,
+        ))
     return get_account(engine, account_id)
 
 

@@ -65,3 +65,27 @@ async def test_failed_task_returns_to_form_with_inputs_preserved(engine):
         await pilot.pause()
         assert app.screen is editor
         assert editor.query_one("#name", Input).value == "Work"
+
+
+async def test_ai_summary_checkbox_persists_and_reauthorization_preserves_it(engine):
+    from textual.widgets import Checkbox
+    account = save_account(engine, "mastodon", "club", "club", {"username": "club"})
+    app = BotApp(engine, project_id=1)
+    async with app.run_test(size=(100, 40)) as pilot:
+        app.query_one("#edit-account", Button).press()
+        await pilot.pause()
+        app.screen.query_one("#ai-summary", Checkbox).value = True
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+        assert get_account(engine, account.id).ai_summary
+    reauthorized = save_account(engine, "mastodon", "club", "club", {"username": "club"})
+    assert reauthorized.ai_summary
+    app = BotApp(engine, project_id=1)
+    async with app.run_test(size=(100, 40)) as pilot:
+        app.query_one("#edit-account", Button).press()
+        await pilot.pause()
+        assert app.screen.query_one("#ai-summary", Checkbox).value
+        app.screen.query_one("#ai-summary", Checkbox).value = False
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+        assert not get_account(engine, account.id).ai_summary

@@ -30,7 +30,7 @@ from utils.filters import exclude_source_only_posts, filter_own_threads
 from utils.posts import sort_chronologically
 from utils.thread_processor import build_outbound_posts, collect_ready_batch
 from utils.urls import unwrap_posts_text
-from utils.rss_summaries import summarize_rss_posts
+from utils.ai_summaries import summarize_posts
 
 logger = logging.getLogger(__name__)
 
@@ -188,8 +188,8 @@ async def sync_account(
                     if not dry_run:
                         await unwrap_posts_text(batch)
                     limits = NETWORK_LIMITS[dest.network]
-                    if source.network == "rss" and get_all_credentials(engine, dest.id).get("rss_ai_summaries") == "true":
-                        await summarize_rss_posts(batch, dest.network, dry_run=dry_run)
+                    if dest.ai_summary:
+                        await summarize_posts(batch, dest.network, dry_run=dry_run)
                     outbounds = (
                         NETWORK_APIS["instagram"].build_outbounds(batch, limits)
                         if source.network == "instagram" else build_outbound_posts(batch, limits)

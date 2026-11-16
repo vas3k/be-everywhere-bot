@@ -8,7 +8,7 @@ import respx
 from apis.rss import _parse_feed
 from config import NETWORK_LIMITS
 from db.posts import load_posts, save_posts
-from utils.rss_summaries import summarize_rss_posts
+from utils.ai_summaries import summarize_posts
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ async def test_summary_keeps_link_before_summary_and_media(network, rss_post, ph
         "status": "completed", "output": [{"type": "message", "content": [{
             "type": "output_text", "text": json.dumps({"summary": "Короткие прогулки помогают закрепить привычку."})}]}],
     }))
-    await summarize_rss_posts([rss_post], network)
+    await summarize_posts([rss_post], network)
     assert rss_post.text == f"{rss_post.rss_title}\n\n{rss_post.rss_link}\n\nКороткие прогулки помогают закрепить привычку."
     assert len(rss_post.text) <= NETWORK_LIMITS[network].max_text
     assert rss_post.media == [photo]
@@ -49,7 +49,7 @@ async def test_unavailable_summary_falls_back_without_blocking(case, rss_post, m
         payload["status"] = "incomplete"
     route = respx.post("https://api.openai.com/v1/responses").mock(return_value=httpx.Response(
         429 if case == "http_error" else 200, json=payload))
-    await summarize_rss_posts([rss_post], "bluesky", dry_run=case == "dry_run")
+    await summarize_posts([rss_post], "bluesky", dry_run=case == "dry_run")
     assert rss_post.text == f"{rss_post.rss_title}\n\n{rss_post.rss_link}"
     if case in ("dry_run", "short_context", "no_key"):
         assert not route.called
@@ -58,7 +58,7 @@ async def test_unavailable_summary_falls_back_without_blocking(case, rss_post, m
 
 async def test_long_title_preserves_whole_link_without_extra_parts(rss_post):
     rss_post.rss_title = "Длинный заголовок 🐈 " * 40
-    await summarize_rss_posts([rss_post], "twitter", dry_run=True)
+    await summarize_posts([rss_post], "twitter", dry_run=True)
     assert rss_post.text.endswith(rss_post.rss_link)
     assert sum(2 if ord(c) > 4351 else 1 for c in rss_post.text) <= 280
 
@@ -84,5 +84,33 @@ async def test_first_person_caption_is_preserved(rss_post, monkeypatch):
         "status": "completed", "output": [{"type": "message", "content": [{
             "type": "output_text", "text": json.dumps({"summary": caption})}]}],
     }))
-    await summarize_rss_posts([rss_post], "threads")
+    await summarize_posts([rss_post], "threads")
     assert rss_post.text == f"{rss_post.rss_title}\n\n{rss_post.rss_link}\n\n{caption}"
+
+
+@pytest.mark.parametrize("network", ["twitter", "bluesky", "threads", "mastodon", "telegram", "linkedin"])
+@respx.mock
+async def test_non_rss_summary_preserves_links_media_and_ids(network, post_factory, photo, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    post = post_factory(text="Я собрал полезный инструмент для прогулок. " * 200 + " https://example.com/a https://example.com/b", media=[photo])
+    route = respx.post("https://api.openai.com/v1/responses").mock(return_value=httpx.Response(200, json={
+        "status": "completed", "output": [{"type": "message", "content": [{
+            "type": "output_text", "text": json.dumps({"summary": "Я собрал инструмент для прогулок."})}]}],
+    }))
+    await summarize_posts([post], network)
+    assert post.text == "https://example.com/a\nhttps://example.com/b\n\nЯ собрал инструмент для прогулок."
+    assert post.media == [photo]
+    assert post.id == "1"
+    assert len(json.loads(json.loads(route.calls[0].request.content)["input"])["excerpt"]) == 5000
+
+
+@pytest.mark.parametrize("case", ["dry_run", "missing_key", "short_context", "api_failure"])
+@respx.mock
+async def test_non_rss_fallback_keeps_original_text(case, post_factory, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "" if case == "missing_key" else "test-key")
+    original = "Коротко" if case == "short_context" else "Я собрал полезный инструмент для прогулок. " * 20
+    post = post_factory(text=original)
+    route = respx.post("https://api.openai.com/v1/responses").mock(return_value=httpx.Response(503))
+    await summarize_posts([post], "threads", dry_run=case == "dry_run")
+    assert post.text == original
+    assert route.call_count == (1 if case == "api_failure" else 0)

@@ -208,7 +208,7 @@ class BotApp(App):
             credentials = get_all_credentials(self.engine, account.id)
             token_dates = " · ".join(f"{key}: {value}" for key, value in credentials.items() if key in ("token_expires_at", "token_renewed_at", "token_renew_attempted_at"))
             detail = (
-                f"{account_display_name(account, self.engine)} · {ROLE_LABELS[account.sync_role]}\n"
+                f"{account_display_name(account, self.engine)} · {ROLE_LABELS[account.sync_role]} · AI summary: {'on' if account.ai_summary else 'off'}\n"
                 f"ID {account.id} · remote {account.remote_id} · last fetch {stats.get('fetched') or 'never'} UTC\n"
                 f"{stats.get('cached', 0)} cached posts · {stats.get('sent', 0)} sent / {stats.get('received', 0)} received mappings · "
                 f"{stats.get('mirrors', 0)} bot-created posts"
@@ -282,7 +282,7 @@ class BotApp(App):
                 configure_project(self.engine, project.id, name=name, **values)
                 self.project_id = project.id
             elif editor.kind == "account":
-                set_account_role(self.engine, editor.account.id, editor.query_one("#role", Select).value, label=editor.query_one("#label", Input).value)
+                set_account_role(self.engine, editor.account.id, editor.query_one("#role", Select).value, label=editor.query_one("#label", Input).value, ai_summary=editor.query_one("#ai-summary", Checkbox).value)
             elif editor.kind == "auth":
                 network = editor.query_one("#network", Select).value
                 label = editor.query_one("#label", Input).value.strip()
@@ -296,6 +296,7 @@ class BotApp(App):
                     self.engine, label=label, project_id=self.project_id,
                     sync_role=editor.query_one("#role", Select).value, credentials=credentials,
                 )
+                set_account_role(self.engine, account.id, account.sync_role, ai_summary=editor.query_one("#ai-summary", Checkbox).value)
                 self.selected_account_id = account.id
             elif editor.kind == "remove":
                 remove_account(self.engine, editor.account.id)

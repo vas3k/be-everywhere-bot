@@ -1,4 +1,4 @@
-"""Opt-in previews from public RSS content, frozen by the normal delivery queue."""
+"""Opt-in captions from normalized source content, frozen by the normal delivery queue."""
 
 import json
 import logging
@@ -10,6 +10,7 @@ import httpx
 
 from apis.types import Post
 from config import NETWORK_LIMITS
+from utils.urls import URL_IN_TEXT
 
 logger = logging.getLogger(__name__)
 
@@ -40,38 +41,46 @@ from a title.
 """
 
 
-async def summarize_rss_posts(posts: list[Post], network: str, *, dry_run: bool = False) -> None:
+async def summarize_posts(posts: list[Post], network: str, *, dry_run: bool = False) -> None:
     limits = NETWORK_LIMITS[network]
     max_length = min(limits.max_text, limits.max_caption)
     api_key = os.environ.get("OPENAI_API_KEY", "")
     model = os.environ.get("OPENAI_SUMMARY_MODEL", "gpt-6-luna")
 
     for post in posts:
-        title = " ".join(post.rss_title.split())
-        link = post.rss_link.strip()
-        if not title or urlsplit(link).scheme not in ("https", "http"):
-            continue
+        if post.rss_link:
+            title = " ".join(post.rss_title.split())
+            link = post.rss_link.strip()
+            if not title or urlsplit(link).scheme not in ("https", "http"):
+                continue
 
-        # Conservative X weights keep emoji/CJK within 280, while also satisfying
-        # the shared formatter's character count. URLs are never shortened here.
-        title_budget = max_length - len(link) - 4
-        if title_budget < 1:
-            continue
-        title_weight = 0
-        title_end = 0
-        for character in title:
-            weight = 2 if network == "twitter" and ord(character) > 4351 else 1
-            if title_weight + weight > title_budget - 1:
-                break
-            title_weight += weight
-            title_end += 1
-        if title_end < len(title):
-            title = title[:title_end].rstrip() + "…"
-            title_weight += 1
-        base = f"{title}\n\n{link}"
-        post.text = base
-        budget = min(350, max_length - title_weight - len(link) - 4)
-        context = post.rss_context.strip()[:5000]
+            # Conservative X weights keep emoji/CJK within 280, while also satisfying
+            # the shared formatter's character count. URLs are never shortened here.
+            title_budget = max_length - len(link) - 4
+            if title_budget < 1:
+                continue
+            title_weight = 0
+            title_end = 0
+            for character in title:
+                weight = 2 if network == "twitter" and ord(character) > 4351 else 1
+                if title_weight + weight > title_budget - 1:
+                    break
+                title_weight += weight
+                title_end += 1
+            if title_end < len(title):
+                title = title[:title_end].rstrip() + "…"
+                title_weight += 1
+            base = f"{title}\n\n{link}"
+            post.text = base
+            budget = min(350, max_length - title_weight - len(link) - 4)
+            context = post.rss_context.strip()[:5000]
+        else:
+            title = ""
+            context = post.text.strip()[:5000]
+            links = list(dict.fromkeys(match.group(0).rstrip(".,;:!?") for match in URL_IN_TEXT.finditer(post.text)))
+            base = "\n".join(links)
+            base_weight = sum(2 if network == "twitter" and ord(char) > 4351 else 1 for char in base)
+            budget = min(350, max_length - base_weight - (2 if base else 0))
         if dry_run or not api_key or budget < 65 or len(context) < 200 or len(context.split()) < 25:
             continue
 
@@ -102,7 +111,7 @@ async def summarize_rss_posts(posts: list[Post], network: str, *, dry_run: bool 
                         },
                     )
                     if response.status_code != 200:
-                        logger.warning("RSS summary unavailable (HTTP %s); keeping title/link", response.status_code)
+                        logger.warning("AI summary unavailable (HTTP %s); keeping source fallback", response.status_code)
                         break
                     payload = response.json()
                     if payload.get("status") != "completed":
@@ -122,10 +131,10 @@ async def summarize_rss_posts(posts: list[Post], network: str, *, dry_run: bool 
                         r"среди тем|автор (?:рассказывает|делится|описывает)|предлагается вспомнить|"
                         r"in (?:this |the )?(?:post|digest|article|roundup)|the author describes)\b", summary, re.I):
                         continue
-                    post.text = f"{base}\n\n{summary}"
-                    logger.info("RSS summary prepared for %s (%d characters)", network, len(post.text))
+                    post.text = f"{base}\n\n{summary}" if base else summary
+                    logger.info("AI summary prepared for %s (%d characters)", network, len(post.text))
                     break
         except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
             # Never log provider bodies or exceptions: they can contain source text
             # or authorization headers. A summary failure must not block delivery.
-            logger.warning("RSS summary unavailable; keeping title/link")
+            logger.warning("AI summary unavailable; keeping source fallback")

@@ -914,13 +914,13 @@ async def test_destination_cutoff_does_not_skip_other_networks(engine, adapters,
 
 async def test_rss_ai_is_opt_in_and_frozen_across_retry(engine, adapters, post_factory, monkeypatch):
     from dataclasses import replace
-    from db.accounts import set_credentials
+    from db.accounts import set_account_role
     from db.deliveries import load_deliveries
 
     source = create_account(engine, "rss", "feed", "feed")
     enabled = create_account(engine, "bluesky", "club", "club", sync_role="destination_only")
     disabled = create_account(engine, "mastodon", "plain", "plain", sync_role="destination_only")
-    set_credentials(engine, enabled.id, {"rss_ai_summaries": "true"})
+    set_account_role(engine, enabled.id, "destination_only", ai_summary=True)
     adapters["rss"].fetch_posts.return_value = [replace(
         post_factory("rss-1", text="Title\n\nhttps://example.com/post"),
         rss_title="Title", rss_link="https://example.com/post", rss_context="Public context " * 100,
@@ -928,7 +928,7 @@ async def test_rss_ai_is_opt_in_and_frozen_across_retry(engine, adapters, post_f
     async def summarize(posts, network, **kwargs):
         posts[0].text += "\n\nFrozen summary."
     summary = AsyncMock(side_effect=summarize)
-    monkeypatch.setattr("sync.engine.summarize_rss_posts", summary)
+    monkeypatch.setattr("sync.engine.summarize_posts", summary)
     adapters["bluesky"].publish_outbound.side_effect = RuntimeError("Temporary failure")
     await run_sync(engine)
     assert summary.await_count == 1
@@ -940,3 +940,25 @@ async def test_rss_ai_is_opt_in_and_frozen_across_retry(engine, adapters, post_f
     assert summary.await_count == 1
     assert is_synced(engine, source.id, "rss-1", enabled.id)
     assert is_synced(engine, source.id, "rss-1", disabled.id)
+
+
+@pytest.mark.parametrize("source_network", ["twitter", "mastodon", "threads", "bluesky", "telegram", "instagram", "linkedin"])
+async def test_ai_setting_routes_every_source_only_to_enabled_destination(source_network, engine, adapters, post_factory, monkeypatch):
+    from db.accounts import set_account_role
+    source = create_account(engine, source_network, "source", "source", sync_role="source_only")
+    enabled = create_account(engine, "bluesky", "caption", "caption", sync_role="destination_only")
+    plain = create_account(engine, "mastodon", "plain", "plain", sync_role="destination_only")
+    set_account_role(engine, enabled.id, "destination_only", ai_summary=True)
+    original = post_factory(text="Original source text")
+    adapters[source_network].fetch_posts.return_value = [original]
+    async def summarize(posts, network, **kwargs):
+        posts[0].text = "Personal caption"
+    summary = AsyncMock(side_effect=summarize)
+    monkeypatch.setattr("sync.engine.summarize_posts", summary)
+    await run_sync(engine)
+    summary.assert_awaited_once()
+    assert adapters["bluesky"].publish_outbound.call_args.args[2].text == "Personal caption"
+    assert adapters["mastodon"].publish_outbound.call_args.args[2].text == "Original source text"
+    assert original.text == "Original source text"
+    assert is_synced(engine, source.id, "1", enabled.id)
+    assert is_synced(engine, source.id, "1", plain.id)

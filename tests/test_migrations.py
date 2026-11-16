@@ -60,7 +60,7 @@ def test_upgrade_preserves_existing_accounts_credentials_and_sync_history(tmp_pa
             rows = connection.execute(select(table)).all()
             if table is schema_migrations:
                 assert before[table.name][0] in rows
-                assert {row.version for row in rows} == {"001_mesh_accounts", "002_durable_sync", "003_projects", "004_account_roles", "005_removed_accounts"}
+                assert {row.version for row in rows} == {"001_mesh_accounts", "002_durable_sync", "003_projects", "004_account_roles", "005_removed_accounts", "006_ai_summary"}
             else:
                 assert rows == before[table.name]
         assert set(connection.execute(select(accounts.c.project_id)).scalars()) == {1}
@@ -82,7 +82,7 @@ def test_fresh_database_has_same_schema_and_migrations_are_repeatable(tmp_path):
     }
     with engine.connect() as connection:
         assert set(connection.execute(select(schema_migrations.c.version)).scalars()) == {
-            "001_mesh_accounts", "002_durable_sync", "003_projects", "004_account_roles", "005_removed_accounts",
+            "001_mesh_accounts", "002_durable_sync", "003_projects", "004_account_roles", "005_removed_accounts", "006_ai_summary",
         }
     engine.dispose()
 
@@ -170,4 +170,24 @@ def test_role_migration_preserves_accounts_and_assigns_network_defaults(tmp_path
     migration.upgrade(engine)
     with engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT sync_role FROM accounts WHERE id = 3").scalar_one() == "destination_only"
+    engine.dispose()
+
+
+def test_ai_summary_migrates_only_opted_in_destinations_and_is_repeatable(tmp_path):
+    from importlib import import_module
+    migration = import_module("db.migrations.versions.006_ai_summary")
+    engine = create_engine(f"sqlite:///{tmp_path / 'ai-summary.db'}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE accounts (id INTEGER PRIMARY KEY, sync_role TEXT, deleted_at DATETIME)")
+        connection.exec_driver_sql("INSERT INTO accounts VALUES (1, 'destination_only', NULL), (2, 'source_and_destination', NULL), (3, 'source_only', NULL)")
+        connection.exec_driver_sql("CREATE TABLE account_credentials (account_id INTEGER, key TEXT, value TEXT)")
+        connection.exec_driver_sql("INSERT INTO account_credentials VALUES (1, 'rss_ai_summaries', 'true'), (2, 'access_token', 'keep'), (3, 'rss_ai_summaries', 'true')")
+    migration.upgrade(engine)
+    with engine.begin() as connection:
+        assert connection.exec_driver_sql("SELECT ai_summary FROM accounts ORDER BY id").scalars().all() == [1, 0, 0]
+        assert connection.exec_driver_sql("SELECT * FROM account_credentials").all() == [(2, 'access_token', 'keep')]
+        connection.exec_driver_sql("UPDATE accounts SET ai_summary=0 WHERE id=1")
+    migration.upgrade(engine)
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql("SELECT ai_summary FROM accounts ORDER BY id").scalars().all() == [0, 0, 0]
     engine.dispose()
